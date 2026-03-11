@@ -217,3 +217,201 @@ def matches_to_training_data(
         training_data = apply_form_weight(training_data, sorted_matches)
 
     return training_data
+
+
+@dataclass
+class MatchFeatures:
+    """Feature vector for a single upcoming match."""
+    home_elo: float
+    away_elo: float
+    elo_diff: float
+    dc_home_xg: float
+    dc_away_xg: float
+    home_form_ppg: float
+    home_form_gf_pg: float
+    home_form_ga_pg: float
+    away_form_ppg: float
+    away_form_gf_pg: float
+    away_form_ga_pg: float
+    home_rest_days: int
+    away_rest_days: int
+    rest_diff: int
+    h2h_home_wins: int
+    h2h_draws: int
+    h2h_away_wins: int
+    home_is_promoted: bool
+    away_is_promoted: bool
+
+    def to_vector(self) -> list[float]:
+        """Convert to numeric feature vector for ML models."""
+        return [
+            self.home_elo, self.away_elo, self.elo_diff,
+            self.dc_home_xg, self.dc_away_xg,
+            self.home_form_ppg, self.home_form_gf_pg, self.home_form_ga_pg,
+            self.away_form_ppg, self.away_form_gf_pg, self.away_form_ga_pg,
+            float(self.home_rest_days), float(self.away_rest_days), float(self.rest_diff),
+            float(self.h2h_home_wins), float(self.h2h_draws), float(self.h2h_away_wins),
+            float(self.home_is_promoted), float(self.away_is_promoted),
+        ]
+
+
+def compute_home_form(matches: list, team: str, last_n: int = 5) -> TeamForm:
+    """Compute form from HOME games only (matches sorted by date descending)."""
+    form = TeamForm(team=team, last_n=0)
+    for match in matches:
+        if match.status != "FINISHED" or match.home_goals is None:
+            continue
+        if match.home_team != team:
+            continue
+        if form.last_n >= last_n:
+            break
+        form.last_n += 1
+        gf, ga = match.home_goals, match.away_goals
+        form.goals_scored += gf
+        form.goals_conceded += ga
+        if ga == 0:
+            form.clean_sheets += 1
+        if gf == 0:
+            form.failed_to_score += 1
+        if gf > ga:
+            form.wins += 1
+            form.points += 3
+        elif gf == ga:
+            form.draws += 1
+            form.points += 1
+        else:
+            form.losses += 1
+    return form
+
+
+def compute_away_form(matches: list, team: str, last_n: int = 5) -> TeamForm:
+    """Compute form from AWAY games only (matches sorted by date descending)."""
+    form = TeamForm(team=team, last_n=0)
+    for match in matches:
+        if match.status != "FINISHED" or match.away_goals is None:
+            continue
+        if match.away_team != team:
+            continue
+        if form.last_n >= last_n:
+            break
+        form.last_n += 1
+        gf, ga = match.away_goals, match.home_goals
+        form.goals_scored += gf
+        form.goals_conceded += ga
+        if ga == 0:
+            form.clean_sheets += 1
+        if gf == 0:
+            form.failed_to_score += 1
+        if gf > ga:
+            form.wins += 1
+            form.points += 3
+        elif gf == ga:
+            form.draws += 1
+            form.points += 1
+        else:
+            form.losses += 1
+    return form
+
+
+def compute_rest_days(
+    matches: list, team: str, reference_date: datetime, default: int = 30
+) -> int:
+    """Days since the team's most recent match."""
+    for match in matches:
+        if match.status != "FINISHED":
+            continue
+        if match.home_team == team or match.away_team == team:
+            match_date = match.utc_date
+            if match_date.tzinfo is None:
+                match_date = match_date.replace(tzinfo=timezone.utc)
+            return (reference_date - match_date).days
+    return default
+
+
+def compute_h2h(
+    matches: list, home_team: str, away_team: str, last_n: int = 3
+) -> tuple[int, int, int]:
+    """Head-to-head record from recent meetings (home perspective).
+
+    Returns:
+        (home_team_wins, draws, away_team_wins) across their last_n meetings.
+    """
+    h_wins, draws, a_wins = 0, 0, 0
+    count = 0
+    for match in matches:
+        if match.status != "FINISHED" or match.home_goals is None:
+            continue
+        teams = {match.home_team, match.away_team}
+        if teams != {home_team, away_team}:
+            continue
+        if count >= last_n:
+            break
+        count += 1
+        if match.home_team == home_team:
+            hg, ag = match.home_goals, match.away_goals
+        else:
+            hg, ag = match.away_goals, match.home_goals
+        if hg > ag:
+            h_wins += 1
+        elif hg == ag:
+            draws += 1
+        else:
+            a_wins += 1
+    return h_wins, draws, a_wins
+
+
+def is_newly_promoted(matches: list, team: str, min_matches: int = 10) -> bool:
+    """Check if a team has too few finished matches in the dataset."""
+    count = 0
+    for match in matches:
+        if match.status != "FINISHED":
+            continue
+        if match.home_team == team or match.away_team == team:
+            count += 1
+            if count >= min_matches:
+                return False
+    return True
+
+
+def build_match_features(
+    matches: list,
+    home_team: str,
+    away_team: str,
+    elo_system,
+    dc_home_xg: float,
+    dc_away_xg: float,
+    reference_date: datetime | None = None,
+) -> MatchFeatures:
+    """Assemble all features for a single fixture."""
+    if reference_date is None:
+        reference_date = datetime.now(timezone.utc)
+
+    home_elo = elo_system.get_rating(home_team)
+    away_elo = elo_system.get_rating(away_team)
+    hf = compute_home_form(matches, home_team)
+    af = compute_away_form(matches, away_team)
+    h_rest = compute_rest_days(matches, home_team, reference_date)
+    a_rest = compute_rest_days(matches, away_team, reference_date)
+    h2h_h, h2h_d, h2h_a = compute_h2h(matches, home_team, away_team)
+
+    return MatchFeatures(
+        home_elo=home_elo,
+        away_elo=away_elo,
+        elo_diff=home_elo - away_elo,
+        dc_home_xg=dc_home_xg,
+        dc_away_xg=dc_away_xg,
+        home_form_ppg=hf.points_per_game,
+        home_form_gf_pg=hf.goals_scored_per_game,
+        home_form_ga_pg=hf.goals_conceded_per_game,
+        away_form_ppg=af.points_per_game,
+        away_form_gf_pg=af.goals_scored_per_game,
+        away_form_ga_pg=af.goals_conceded_per_game,
+        home_rest_days=h_rest,
+        away_rest_days=a_rest,
+        rest_diff=h_rest - a_rest,
+        h2h_home_wins=h2h_h,
+        h2h_draws=h2h_d,
+        h2h_away_wins=h2h_a,
+        home_is_promoted=is_newly_promoted(matches, home_team),
+        away_is_promoted=is_newly_promoted(matches, away_team),
+    )

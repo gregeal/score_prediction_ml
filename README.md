@@ -187,9 +187,20 @@ docker compose exec backend python scripts/train_model.py
 
 ## Roadmap
 
-- [ ] Upgrade to hybrid model (xG + Elo + gradient boosting)
-- [ ] Android app
-- [ ] Betting platform integration (Bet9ja, BetKing)
-- [ ] User accounts & saved predictions
-- [ ] Push notifications
-- [ ] Telegram bot
+See [docs/plans/v2-roadmap.md](docs/plans/v2-roadmap.md) for the full implementation plan.
+
+**Next 3 priorities:**
+1. Feature expansion + challenger model (home/away form, xG, Elo, gradient boosting)
+2. Calibration and richer accuracy dashboard (Brier score by bucket, benchmark vs bookmakers)
+3. Match explanation page + data freshness/status
+
+**Full roadmap:**
+- [ ] Phase 1: Richer features + Dixon-Coles + Elo + gradient boosting challenger model
+- [ ] Phase 2: Probability calibration, rolling backtests, benchmark table
+- [ ] Phase 3: Match explanation page, data freshness in UI, `/api/status` endpoint
+- [ ] Phase 4: xG data, injuries, bookmaker odds integration
+- [ ] Phase 5: Team watchlists, notifications, daily prediction summaries
+- [ ] Phase 6: Scheduled jobs, model registry, expanded test coverage
+- [ ] Android app (React Native or Flutter)
+- [ ] Betting platform integration (Bet9ja, BetKing affiliate links)
+- [ ] Telegram bot for prediction delivery
