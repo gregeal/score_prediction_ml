@@ -70,9 +70,9 @@ class PredictionService:
                 mlflow.log_metric(f"attack_{safe_name}", params.attack[team])
                 mlflow.log_metric(f"defense_{safe_name}", params.defense[team])
 
-            # Run evaluation if requested
+            # Run evaluation if requested (pass raw matches to avoid form-weight leakage)
             if run_evaluation and len(training_data) > 100:
-                self._evaluate_and_log(training_data)
+                self._evaluate_and_log(matches)
 
             # Save model artifact
             with open(MODEL_PATH, "wb") as f:
@@ -84,8 +84,15 @@ class PredictionService:
                 f"Rho: {params.rho:.3f}"
             )
 
-    def _evaluate_and_log(self, all_data: list) -> None:
-        """Split data, evaluate, and log metrics to MLflow."""
+    def _evaluate_and_log(self, raw_matches: list[Match]) -> None:
+        """Split data, evaluate, and log metrics to MLflow.
+
+        Builds train/test splits from raw Match objects without form weighting
+        to prevent data leakage (form weights use future match info).
+        """
+        # Convert without form weighting to get clean splits
+        all_data = matches_to_training_data(raw_matches, use_form_weighting=False)
+
         # Use last 20% of matches as test set
         split_idx = int(len(all_data) * 0.8)
         train_split = all_data[:split_idx]
@@ -128,7 +135,11 @@ class PredictionService:
         logger.info("Model loaded from disk")
 
     def predict_upcoming(self) -> list[MatchPrediction]:
-        """Generate predictions for all upcoming matches."""
+        """Generate predictions for all upcoming matches.
+
+        Replaces any existing predictions for each match so there is
+        at most one prediction row per match_api_id.
+        """
         upcoming = (
             self.db.query(Match)
             .filter(Match.status.in_(["SCHEDULED", "TIMED"]))
@@ -141,6 +152,11 @@ class PredictionService:
             try:
                 pred = self.model.predict_match(match.home_team, match.away_team)
                 predictions.append(pred)
+
+                # Delete any previous prediction for this match
+                self.db.query(Prediction).filter(
+                    Prediction.match_api_id == match.api_id
+                ).delete()
 
                 # Store prediction in database (convert np.float64 to float for PostgreSQL)
                 db_pred = Prediction(

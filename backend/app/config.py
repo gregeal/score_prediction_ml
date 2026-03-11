@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./predictepl.db"
     mlflow_tracking_uri: str = "http://localhost:5000"
 
-    model_config = {"env_file": str(_env_file)}
+    model_config = {"env_file": str(_env_file), "extra": "ignore"}
 
 
 settings = Settings()

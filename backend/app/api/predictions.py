@@ -51,9 +51,29 @@ def get_prediction(match_api_id: int, db: Session = Depends(get_db)):
 
 @router.get("/accuracy")
 def get_accuracy(db: Session = Depends(get_db)):
-    """Get model accuracy stats by comparing predictions to actual results."""
-    # Find predictions where the match has finished
-    predictions = db.query(Prediction).all()
+    """Get model accuracy stats by comparing predictions to actual results.
+
+    Uses only the latest prediction per match to avoid counting duplicates.
+    """
+    # Get finished matches that have predictions
+    from sqlalchemy import func as sa_func
+
+    # Subquery: latest prediction id per match
+    latest_pred = (
+        db.query(
+            Prediction.match_api_id,
+            sa_func.max(Prediction.id).label("latest_id"),
+        )
+        .group_by(Prediction.match_api_id)
+        .subquery()
+    )
+
+    predictions = (
+        db.query(Prediction)
+        .join(latest_pred, Prediction.id == latest_pred.c.latest_id)
+        .all()
+    )
+
     if not predictions:
         return {"total_evaluated": 0, "message": "No predictions to evaluate yet"}
 

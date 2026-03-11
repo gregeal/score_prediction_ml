@@ -44,19 +44,32 @@ def main():
                 raise
 
             season_added = 0
+            season_updated = 0
             for match_data in parsed_matches:
-                # Skip if already exists
                 existing = db.query(Match).filter_by(api_id=match_data["api_id"]).first()
                 if existing:
-                    continue
-
-                match = Match(**match_data)
-                db.add(match)
-                season_added += 1
-                total_added += 1
+                    # Upsert: update status and scores if they changed
+                    changed = False
+                    if existing.status != match_data["status"]:
+                        existing.status = match_data["status"]
+                        changed = True
+                    if match_data["home_goals"] is not None and existing.home_goals != match_data["home_goals"]:
+                        existing.home_goals = match_data["home_goals"]
+                        existing.away_goals = match_data["away_goals"]
+                        changed = True
+                    if changed:
+                        season_updated += 1
+                else:
+                    match = Match(**match_data)
+                    db.add(match)
+                    season_added += 1
+                    total_added += 1
 
             db.commit()
-            logger.info(f"Season {season}/{season + 1}: added {season_added} new matches")
+            logger.info(
+                f"Season {season}/{season + 1}: "
+                f"added {season_added} new, updated {season_updated} existing"
+            )
 
         logger.info(f"Done. Total new matches added: {total_added}. "
                      f"Total in database: {db.query(Match).count()}")
