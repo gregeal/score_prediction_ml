@@ -5,9 +5,42 @@ import pickle
 from datetime import datetime, timezone
 from pathlib import Path
 
-import mlflow
 import numpy as np
 from sqlalchemy.orm import Session
+
+try:
+    import mlflow
+    MLFLOW_AVAILABLE = True
+except ModuleNotFoundError:
+    MLFLOW_AVAILABLE = False
+
+    class _NoOpRun:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _NoOpMlflow:
+        def set_tracking_uri(self, *args, **kwargs):
+            pass
+
+        def set_experiment(self, *args, **kwargs):
+            pass
+
+        def start_run(self, *args, **kwargs):
+            return _NoOpRun()
+
+        def log_param(self, *args, **kwargs):
+            pass
+
+        def log_metric(self, *args, **kwargs):
+            pass
+
+        def log_artifact(self, *args, **kwargs):
+            pass
+
+    mlflow = _NoOpMlflow()
 
 from app.config import settings
 from app.models.match import Match
@@ -19,6 +52,8 @@ from app.ml.features import build_match_features, matches_to_training_data
 from app.ml.evaluate import backtest
 
 logger = logging.getLogger(__name__)
+if not MLFLOW_AVAILABLE:
+    logger.warning("MLflow is not installed; training will continue without experiment logging.")
 
 MODEL_DIR = Path(__file__).parent.parent.parent
 DC_MODEL_PATH = MODEL_DIR / "trained_model.pkl"
