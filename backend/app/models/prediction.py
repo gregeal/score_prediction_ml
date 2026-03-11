@@ -18,5 +18,6 @@ class Prediction(Base):
     over25_prob = Column(Float, nullable=False)
     btts_prob = Column(Float, nullable=False)
     most_likely_score = Column(String)
+    outcome_score = Column(String)  # Most likely score matching the predicted outcome
     confidence = Column(String)
     created_at = Column(DateTime, server_default=func.now())

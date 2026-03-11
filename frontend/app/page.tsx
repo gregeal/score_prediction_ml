@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 interface Prediction {
   outcome: { home_win: number; draw: number; away_win: number };
   most_likely_score: string;
+  outcome_score: string;
   over_under_25: number;
   btts: number;
   confidence: string;
@@ -90,7 +91,7 @@ function FixtureCard({ fixture }: { fixture: Fixture }) {
         </div>
         {pred ? (
           <div className="px-4 text-center">
-            <p className="text-xl font-bold text-green-400">{pred.most_likely_score}</p>
+            <p className="text-xl font-bold text-green-400">{pred.outcome_score || pred.most_likely_score}</p>
             <p className="text-[10px] text-slate-500 mt-0.5">PREDICTED</p>
           </div>
         ) : (

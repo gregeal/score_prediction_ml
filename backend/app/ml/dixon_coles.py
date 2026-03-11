@@ -43,7 +43,8 @@ class MatchPrediction:
     over25_prob: float = 0.0
     btts_prob: float = 0.0
     top_scores: list = field(default_factory=list)  # [(score_str, prob), ...]
-    most_likely_score: str = ""
+    most_likely_score: str = ""  # Overall most likely scoreline
+    outcome_score: str = ""  # Most likely score consistent with predicted outcome
     confidence: str = "medium"
     predicted_home_goals: float = 0.0
     predicted_away_goals: float = 0.0
@@ -329,10 +330,28 @@ class DixonColesModel:
         scores = []
         for i in range(n):
             for j in range(n):
-                scores.append((f"{i}-{j}", matrix[i, j]))
+                scores.append((f"{i}-{j}", matrix[i, j], i, j))
         scores.sort(key=lambda x: x[1], reverse=True)
-        prediction.top_scores = [(s, round(p, 4)) for s, p in scores[:5]]
+        prediction.top_scores = [(s, round(p, 4)) for s, p, _, _ in scores[:5]]
         prediction.most_likely_score = scores[0][0]
+
+        # Most likely score consistent with the predicted outcome
+        # This avoids the confusing case where team A is favored but predicted score is a draw
+        predicted_outcome = "home" if home_win >= away_win and home_win >= draw else (
+            "away" if away_win >= home_win and away_win >= draw else "draw"
+        )
+        for score_str, prob, i, j in scores:
+            if predicted_outcome == "home" and i > j:
+                prediction.outcome_score = score_str
+                break
+            elif predicted_outcome == "away" and j > i:
+                prediction.outcome_score = score_str
+                break
+            elif predicted_outcome == "draw" and i == j:
+                prediction.outcome_score = score_str
+                break
+        if not prediction.outcome_score:
+            prediction.outcome_score = prediction.most_likely_score
 
         # Confidence rating
         max_outcome = max(home_win, draw, away_win)

@@ -7,16 +7,20 @@ Uses a **Dixon-Coles Poisson model** to predict match outcomes, exact scores, ov
 ## Tech Stack
 
 - **ML Model:** Python, SciPy, scikit-learn (Dixon-Coles Poisson regression)
+- **Experiment Tracking:** MLflow
 - **Backend API:** FastAPI
 - **Frontend:** Next.js, TypeScript, Tailwind CSS
-- **Database:** SQLite (dev) / PostgreSQL (production)
+- **Database:** PostgreSQL (via Docker)
 - **Data Source:** football-data.org API
+- **Infrastructure:** Docker Compose
 
 ## Project Structure
 
 ```
 score_prediction_ml/
+├── docker-compose.yml           # PostgreSQL + MLflow + Backend
 ├── backend/
+│   ├── Dockerfile
 │   ├── app/
 │   │   ├── main.py              # FastAPI app entry point
 │   │   ├── config.py            # Settings & env vars
@@ -42,114 +46,130 @@ score_prediction_ml/
 
 ### Prerequisites
 
-- Python 3.12+
+- Docker & Docker Compose
 - Node.js 18+
-- [uv](https://docs.astral.sh/uv/) (Python package manager)
 - A free API key from [football-data.org](https://www.football-data.org/client/register)
 
-### 1. Clone & Set Up Environment
+### Quick Start (Docker)
+
+This is the recommended way to run the full stack.
 
 ```bash
+# 1. Clone and configure
 git clone <your-repo-url>
 cd score_prediction_ml
-
-# Create Python virtual environment
-uv venv venv --python 3.12
-
-# Activate it
-# On Windows (Git Bash):
-source venv/Scripts/activate
-# On macOS/Linux:
-source venv/bin/activate
-
-# Install Python dependencies
-uv pip install --python venv/Scripts/python.exe -r backend/requirements.txt
-```
-
-### 2. Configure API Key
-
-```bash
 cp .env.example .env
 # Edit .env and add your football-data.org API key
-```
 
-The `.env` file should contain:
-```
-FOOTBALL_DATA_API_KEY=your_api_key_here
-DATABASE_URL=sqlite:///./predictepl.db
-```
+# 2. Start PostgreSQL, MLflow, and the backend API
+docker compose up -d
 
-### 3. Fetch Historical Data
+# 3. Fetch EPL data (run inside the backend container)
+docker compose exec backend python scripts/fetch_data.py
 
-This fetches EPL match data for the 2022/23 through 2025/26 seasons:
+# 4. Train model & generate predictions
+docker compose exec backend python scripts/train_model.py
 
-```bash
-cd backend
-python scripts/fetch_data.py
-```
-
-> Note: The free API tier allows 10 requests/minute. The script handles rate limiting automatically, so fetching 4 seasons takes a few minutes.
-
-### 4. Train Model & Generate Predictions
-
-```bash
-python scripts/train_model.py
-```
-
-This will:
-1. Train the Dixon-Coles model on all historical match data
-2. Generate predictions for all upcoming (scheduled) fixtures
-3. Save the trained model to `backend/trained_model.pkl`
-4. Print a summary of predictions to the console
-
-### 5. Start the Backend API
-
-```bash
-cd backend
-uvicorn app.main:app --reload --port 8000
-```
-
-The API will be available at `http://localhost:8000`. Key endpoints:
-- `GET /api/fixtures/upcoming` — Upcoming matches with predictions
-- `GET /api/predictions/{match_id}` — Detailed prediction for a match
-- `GET /api/accuracy` — Model accuracy statistics
-- `GET /api/standings` — Current EPL table
-- `GET /docs` — Interactive API documentation (Swagger UI)
-
-### 6. Start the Frontend
-
-In a separate terminal:
-
-```bash
+# 5. Start the frontend (in a separate terminal)
 cd frontend
 npm install
 npm run dev
 ```
 
-Open `http://localhost:3000` in your browser.
+After this:
+- **Frontend:** http://localhost:3000
+- **Backend API:** http://localhost:8000 (Swagger docs at /docs)
+- **MLflow UI:** http://localhost:5000
+
+### Local Development (without Docker)
+
+If you prefer running without Docker:
+
+```bash
+# 1. Set up Python environment
+uv venv venv --python 3.12
+source venv/Scripts/activate  # Windows Git Bash
+# source venv/bin/activate    # macOS/Linux
+uv pip install --python venv/Scripts/python.exe -r backend/requirements.txt
+
+# 2. Configure
+cp .env.example .env
+# Edit .env:
+#   - Add your football-data.org API key
+#   - Change DATABASE_URL to sqlite:///./predictepl.db if you don't have PostgreSQL
+
+# 3. Fetch data, train, and run
+cd backend
+python scripts/fetch_data.py
+python scripts/train_model.py
+uvicorn app.main:app --reload --port 8000
+
+# 4. Frontend (separate terminal)
+cd frontend
+npm install
+npm run dev
+```
+
+## Docker Services
+
+| Service | Port | Description |
+|---------|------|-------------|
+| `db` | 5432 | PostgreSQL 16 database |
+| `mlflow` | 5000 | MLflow tracking server (UI + API) |
+| `backend` | 8000 | FastAPI prediction API |
+
+```bash
+# View logs
+docker compose logs -f backend
+
+# Stop everything
+docker compose down
+
+# Stop and remove all data (fresh start)
+docker compose down -v
+```
+
+## MLflow Experiment Tracking
+
+Every training run logs to MLflow:
+
+- **Parameters:** model type, time decay, number of training matches, team count
+- **Metrics:** home advantage, rho, per-team attack/defense strengths
+- **Evaluation metrics:** outcome accuracy, exact score accuracy, O/U 2.5 accuracy, BTTS accuracy, Brier score, log loss
+- **Artifacts:** trained model pickle file
+
+Access the MLflow UI at http://localhost:5000 to compare runs, view metrics, and track model evolution over time.
 
 ## Running Tests
 
 ```bash
-cd backend
+# With Docker
+docker compose exec backend python -m pytest tests/ -v
+
+# Without Docker (from backend/ directory)
 python -m pytest tests/ -v
 ```
+
+## API Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/fixtures/upcoming` | Upcoming matches with predictions |
+| `GET /api/predictions/{match_id}` | Detailed prediction for a match |
+| `GET /api/accuracy` | Model accuracy statistics |
+| `GET /api/standings` | Current EPL table |
+| `GET /docs` | Interactive Swagger docs |
 
 ## How It Works
 
 ### The Dixon-Coles Model
 
-1. **Team Ratings:** The model estimates attack strength and defense strength for each EPL team using maximum likelihood estimation on historical match results.
-
-2. **Home Advantage:** A home advantage parameter captures the statistical edge of playing at home.
-
-3. **Low-Score Correction:** The Dixon-Coles correction factor (rho) adjusts probabilities for 0-0, 1-0, 0-1, and 1-1 scorelines, which basic Poisson models get wrong.
-
-4. **Time Weighting:** Recent matches are weighted more heavily using exponential decay (half-life = 1 season), so the model adapts to current form.
-
-5. **Score Matrix:** For each match, the model produces a 10x10 probability matrix for every possible scoreline (0-0 through 9-9).
-
-6. **Derived Predictions:** From the score matrix, we calculate:
+1. **Team Ratings:** Estimates attack and defense strength for each EPL team using maximum likelihood estimation on historical results.
+2. **Home Advantage:** A parameter capturing the statistical edge of playing at home.
+3. **Low-Score Correction:** The Dixon-Coles rho factor adjusts probabilities for 0-0, 1-0, 0-1, and 1-1 scorelines.
+4. **Time Weighting:** Exponential decay (half-life = 1 season) so recent form matters more.
+5. **Score Matrix:** A 10x10 probability matrix for every possible scoreline.
+6. **Derived Predictions:**
    - **1X2:** Home win / Draw / Away win probabilities
    - **Exact Score:** Top 5 most likely scorelines
    - **Over/Under 2.5:** Probability of total goals > 2.5
@@ -157,41 +177,12 @@ python -m pytest tests/ -v
 
 ### Daily Pipeline
 
-For production use, run the pipeline daily:
+Run data fetch + retrain daily to keep predictions current:
+
 ```bash
-# Fetch latest results + retrain + predict upcoming
-cd backend
-python scripts/fetch_data.py && python scripts/train_model.py
-```
-
-This can be scheduled as a cron job:
-```cron
-0 6 * * * cd /path/to/score_prediction_ml/backend && python scripts/fetch_data.py && python scripts/train_model.py
-```
-
-## API Response Examples
-
-### Upcoming Fixtures
-```json
-{
-  "fixtures": [
-    {
-      "match_id": 12345,
-      "home": "Arsenal FC",
-      "away": "Chelsea FC",
-      "date": "2026-03-14T15:00:00+00:00",
-      "matchday": 28,
-      "prediction": {
-        "outcome": {"home_win": 0.52, "draw": 0.24, "away_win": 0.24},
-        "most_likely_score": "2-1",
-        "over_under_25": 0.58,
-        "btts": 0.55,
-        "confidence": "medium"
-      }
-    }
-  ],
-  "count": 1
-}
+# With Docker
+docker compose exec backend python scripts/fetch_data.py
+docker compose exec backend python scripts/train_model.py
 ```
 
 ## Roadmap
