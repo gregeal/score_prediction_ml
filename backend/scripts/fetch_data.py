@@ -18,6 +18,39 @@ logger = logging.getLogger(__name__)
 
 # Seasons to fetch (starting year). Free API tier may only support recent seasons.
 SEASONS = [2022, 2023, 2024, 2025]
+SYNC_FIELDS = (
+    "season",
+    "matchday",
+    "utc_date",
+    "status",
+    "home_team",
+    "away_team",
+    "home_goals",
+    "away_goals",
+)
+
+
+def sync_parsed_matches(db, parsed_matches: list[dict]) -> tuple[int, int]:
+    """Insert new matches and update mutable fields on existing ones."""
+    added = 0
+    updated = 0
+
+    for match_data in parsed_matches:
+        existing = db.query(Match).filter_by(api_id=match_data["api_id"]).first()
+        if existing:
+            changed = False
+            for field in SYNC_FIELDS:
+                new_value = match_data[field]
+                if getattr(existing, field) != new_value:
+                    setattr(existing, field, new_value)
+                    changed = True
+            if changed:
+                updated += 1
+        else:
+            db.add(Match(**match_data))
+            added += 1
+
+    return added, updated
 
 
 def main():
@@ -43,30 +76,8 @@ def main():
                     continue
                 raise
 
-            season_added = 0
-            season_updated = 0
-            for match_data in parsed_matches:
-                existing = db.query(Match).filter_by(api_id=match_data["api_id"]).first()
-                if existing:
-                    # Upsert: update status and scores if they changed
-                    changed = False
-                    if existing.status != match_data["status"]:
-                        existing.status = match_data["status"]
-                        changed = True
-                    if match_data["home_goals"] is not None and (
-                        existing.home_goals != match_data["home_goals"]
-                        or existing.away_goals != match_data["away_goals"]
-                    ):
-                        existing.home_goals = match_data["home_goals"]
-                        existing.away_goals = match_data["away_goals"]
-                        changed = True
-                    if changed:
-                        season_updated += 1
-                else:
-                    match = Match(**match_data)
-                    db.add(match)
-                    season_added += 1
-                    total_added += 1
+            season_added, season_updated = sync_parsed_matches(db, parsed_matches)
+            total_added += season_added
 
             db.commit()
             logger.info(
