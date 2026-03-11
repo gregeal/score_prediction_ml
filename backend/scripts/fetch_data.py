@@ -9,7 +9,7 @@ import requests
 # Add backend to path so we can import app modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.models.base import Base, engine, SessionLocal
+from app.models.base import Base, get_engine, get_session_local
 from app.models.match import Match
 from app.services.data_fetcher import FootballDataFetcher
 
@@ -22,11 +22,11 @@ SEASONS = [2022, 2023, 2024, 2025]
 
 def main():
     # Create tables
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=get_engine())
     logger.info("Database tables created")
 
     fetcher = FootballDataFetcher()
-    db = SessionLocal()
+    db = get_session_local()()
 
     try:
         total_added = 0
@@ -53,7 +53,10 @@ def main():
                     if existing.status != match_data["status"]:
                         existing.status = match_data["status"]
                         changed = True
-                    if match_data["home_goals"] is not None and existing.home_goals != match_data["home_goals"]:
+                    if match_data["home_goals"] is not None and (
+                        existing.home_goals != match_data["home_goals"]
+                        or existing.away_goals != match_data["away_goals"]
+                    ):
                         existing.home_goals = match_data["home_goals"]
                         existing.away_goals = match_data["away_goals"]
                         changed = True

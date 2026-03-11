@@ -10,7 +10,7 @@ import logging
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.models.base import Base, engine, SessionLocal
+from app.models.base import Base, get_engine, get_session_local
 from app.services.predictor import PredictionService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -18,9 +18,9 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=get_engine())
 
-    db = SessionLocal()
+    db = get_session_local()()
     try:
         service = PredictionService(db)
 

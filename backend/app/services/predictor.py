@@ -38,6 +38,7 @@ class PredictionService:
         matches = (
             self.db.query(Match)
             .filter(Match.status == "FINISHED")
+            .order_by(Match.utc_date)
             .all()
         )
         if not matches:
