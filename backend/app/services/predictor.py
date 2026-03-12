@@ -76,7 +76,8 @@ class PredictionService:
         self.elo_system: EloSystem | None = None
         self.calibrator: OutcomeCalibrator | None = None
         self.active_model = "dixon_coles"  # or "challenger"
-        mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
+        if settings.mlflow_tracking_uri:
+            mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
 
     @property
     def model(self):

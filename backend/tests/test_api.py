@@ -142,6 +142,11 @@ class TestRootEndpoint:
         assert data["app"] == "PredictEPL"
         assert data["status"] == "running"
 
+    def test_health(self, client):
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+
 
 class TestFixturesEndpoints:
     def test_upcoming_empty(self, client):
