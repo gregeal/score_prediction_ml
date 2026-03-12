@@ -10,6 +10,7 @@ interface SummaryData {
   model_version?: string | null;
   calibration_version?: string | null;
   benchmark_delta_vs_naive?: number | null;
+  evaluation_source?: string | null;
 }
 
 interface CalibrationBucket {
@@ -200,6 +201,12 @@ export default function AccuracyPage() {
           </div>
         </div>
       </div>
+
+      {data.message && (
+        <div className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 px-5 py-4 text-sm text-cyan-100">
+          {data.message}
+        </div>
+      )}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <StatCard

@@ -7,7 +7,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+import app.api.predictions as predictions_api
 from app.main import app
+from app.ml.evaluate import score_prediction
 from app.models.base import Base, get_db
 from app.models.market_odds import MarketOdds
 from app.models.match import Match
@@ -209,3 +211,59 @@ class TestPredictionEndpoints:
         assert data["benchmarks"]["model"]["available"] is True
         assert data["benchmarks"]["naive"]["available"] is True
         assert data["benchmarks"]["bookmaker"]["available"] is True
+
+    def test_accuracy_falls_back_to_snapshot_metrics(self, client, monkeypatch):
+        db = TestSession()
+        db.add(
+            Match(
+                api_id=20001,
+                season="2025",
+                matchday=20,
+                utc_date=datetime(2026, 1, 10, 15, 0, tzinfo=timezone.utc),
+                status="FINISHED",
+                home_team="Arsenal FC",
+                away_team="Chelsea FC",
+                home_goals=2,
+                away_goals=1,
+            )
+        )
+        db.add(
+            Match(
+                api_id=20002,
+                season="2025",
+                matchday=21,
+                utc_date=datetime(2026, 1, 17, 15, 0, tzinfo=timezone.utc),
+                status="FINISHED",
+                home_team="Liverpool FC",
+                away_team="Manchester City FC",
+                home_goals=1,
+                away_goals=1,
+            )
+        )
+        db.commit()
+        db.close()
+
+        monkeypatch.setattr(
+            predictions_api,
+            "build_recent_snapshot_predictions",
+            lambda *args, **kwargs: [
+                score_prediction(
+                    predicted_probs=(0.56, 0.24, 0.20),
+                    actual_outcome="home",
+                    predicted_score="2-1",
+                    actual_score="2-1",
+                    baseline_probs=(0.34, 0.33, 0.33),
+                    bookmaker_probs=(0.49, 0.27, 0.24),
+                )
+            ],
+        )
+        monkeypatch.setattr(predictions_api.PredictionService, "load_model", lambda self: None)
+
+        response = client.get("/api/accuracy")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["total_evaluated"] == 1
+        assert data["summary"]["evaluation_source"] == "model_snapshot"
+        assert "saved model" in data["message"]
+        assert data["benchmarks"]["model"]["available"] is True

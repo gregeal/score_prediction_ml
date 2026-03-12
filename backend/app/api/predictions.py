@@ -6,11 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
-from app.ml.evaluate import build_dashboard_result, score_prediction
+from app.ml.evaluate import build_dashboard_result, build_recent_snapshot_predictions, score_prediction
 from app.models.base import get_db
 from app.models.market_odds import MarketOdds
 from app.models.match import Match
 from app.models.prediction import Prediction
+from app.services.predictor import PredictionService
 
 router = APIRouter(tags=["predictions"])
 
@@ -146,6 +147,19 @@ def get_accuracy(db: Session = Depends(get_db)):
         .subquery()
     )
 
+    finished_matches = (
+        db.query(Match)
+        .filter(Match.status == "FINISHED", Match.home_goals.isnot(None))
+        .order_by(Match.utc_date)
+        .all()
+    )
+    priors = _league_priors(finished_matches)
+    odds_map = _latest_market_odds_map(db)
+    bookmaker_probs_by_match = {
+        match_api_id: _implied_probs(odds)
+        for match_api_id, odds in odds_map.items()
+    }
+
     prediction_rows = (
         db.query(Prediction, Match)
         .join(latest_pred, Prediction.id == latest_pred.c.latest_id)
@@ -155,38 +169,73 @@ def get_accuracy(db: Session = Depends(get_db)):
         .all()
     )
 
-    if not prediction_rows:
-        return {"total_evaluated": 0, "message": "No finished matches with predictions yet"}
-
-    finished_matches = (
-        db.query(Match)
-        .filter(Match.status == "FINISHED", Match.home_goals.isnot(None))
-        .order_by(Match.utc_date)
-        .all()
-    )
-    priors = _league_priors(finished_matches)
-    odds_map = _latest_market_odds_map(db)
-
     evaluated = []
-    for prediction, match in prediction_rows:
-        evaluated.append(
-            score_prediction(
-                predicted_probs=(
-                    float(prediction.home_win_prob),
-                    float(prediction.draw_prob),
-                    float(prediction.away_win_prob),
-                ),
-                actual_outcome=_match_outcome(match),
-                match_date=match.utc_date,
-                match_api_id=match.api_id,
-                predicted_score=prediction.most_likely_score,
-                actual_score=f"{match.home_goals}-{match.away_goals}",
-                over25_prob=float(prediction.over25_prob),
-                btts_prob=float(prediction.btts_prob),
-                baseline_probs=priors.get(match.api_id),
-                bookmaker_probs=_implied_probs(odds_map.get(match.api_id)),
+    message = None
+    evaluation_source = "stored_predictions"
+
+    if prediction_rows:
+        for prediction, match in prediction_rows:
+            evaluated.append(
+                score_prediction(
+                    predicted_probs=(
+                        float(prediction.home_win_prob),
+                        float(prediction.draw_prob),
+                        float(prediction.away_win_prob),
+                    ),
+                    actual_outcome=_match_outcome(match),
+                    match_date=match.utc_date,
+                    match_api_id=match.api_id,
+                    predicted_score=prediction.outcome_score or prediction.most_likely_score,
+                    actual_score=f"{match.home_goals}-{match.away_goals}",
+                    over25_prob=float(prediction.over25_prob),
+                    btts_prob=float(prediction.btts_prob),
+                    baseline_probs=priors.get(match.api_id),
+                    bookmaker_probs=bookmaker_probs_by_match.get(match.api_id),
+                )
             )
-        )
+    else:
+        try:
+            service = PredictionService(db)
+            service.load_model()
+            finished_desc = sorted(finished_matches, key=lambda match: match.utc_date, reverse=True)
+
+            def predict_finished_match(match: Match):
+                try:
+                    if (
+                        service.active_model == "challenger"
+                        and service.challenger.is_fitted
+                        and service.elo_system is not None
+                    ):
+                        pred = service.challenger.predict_match(
+                            match.home_team,
+                            match.away_team,
+                            service.elo_system,
+                            finished_desc,
+                            reference_date=match.utc_date,
+                        )
+                    else:
+                        pred = service.dc_model.predict_match(match.home_team, match.away_team)
+                    service._apply_outcome_calibration(pred)
+                    return pred
+                except (ValueError, KeyError):
+                    return None
+
+            evaluated = build_recent_snapshot_predictions(
+                finished_matches,
+                predict_match=predict_finished_match,
+                baseline_probs_by_match=priors,
+                bookmaker_probs_by_match=bookmaker_probs_by_match,
+            )
+            evaluation_source = "model_snapshot"
+            if evaluated:
+                message = (
+                    "Showing a recent snapshot benchmark from the saved model until enough predicted "
+                    "fixtures have finished for live evaluation."
+                )
+            else:
+                return {"total_evaluated": 0, "message": "No finished matches with predictions or snapshot data yet"}
+        except FileNotFoundError:
+            return {"total_evaluated": 0, "message": "No finished matches with predictions or saved model artifacts yet"}
 
     dashboard = build_dashboard_result(evaluated)
     latest_prediction = (
@@ -215,7 +264,9 @@ def get_accuracy(db: Session = Depends(get_db)):
             "model_version": latest_prediction.model_version if latest_prediction else None,
             "calibration_version": latest_prediction.calibration_version if latest_prediction else None,
             "benchmark_delta_vs_naive": benchmark_delta,
+            "evaluation_source": evaluation_source,
         },
+        "message": message,
         "calibration": {
             "target": "predicted_outcome",
             "buckets": [bucket.__dict__ for bucket in dashboard.calibration_buckets],

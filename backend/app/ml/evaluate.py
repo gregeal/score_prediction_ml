@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from math import log
+from typing import Callable
 
 import numpy as np
 
-from app.ml.dixon_coles import DixonColesModel, MatchData
+from app.ml.dixon_coles import DixonColesModel, MatchData, MatchPrediction
+from app.ml.features import matches_to_training_data
+from app.models.match import Match
 
 logger = logging.getLogger(__name__)
 
@@ -434,6 +437,170 @@ def build_dashboard_result(predictions: list[EvaluatedPrediction]) -> AccuracyDa
         rolling_windows=build_rolling_window_metrics(predictions),
         benchmarks=compare_benchmarks(predictions),
     )
+
+
+def build_recent_backtest_predictions(
+    matches: list[Match],
+    *,
+    baseline_probs_by_match: dict[int, tuple[float, float, float]] | None = None,
+    bookmaker_probs_by_match: dict[int, tuple[float, float, float]] | None = None,
+    window_size: int = 20,
+    max_evaluated_matches: int = 40,
+    min_train_matches: int = 60,
+    training_window_matches: int = 200,
+    time_decay_days: int = 365,
+) -> list[EvaluatedPrediction]:
+    """Build a recent walk-forward backtest for dashboards when live eval rows do not exist yet."""
+
+    finished = sorted(
+        [
+            match for match in matches
+            if match.status == "FINISHED" and match.home_goals is not None and match.away_goals is not None
+        ],
+        key=lambda match: match.utc_date,
+    )
+    if len(finished) <= min_train_matches:
+        return []
+
+    start_index = max(min_train_matches, len(finished) - max_evaluated_matches)
+    evaluated: list[EvaluatedPrediction] = []
+
+    for chunk_start in range(start_index, len(finished), window_size):
+        chunk = finished[chunk_start : chunk_start + window_size]
+        if not chunk:
+            break
+
+        reference_date = chunk[0].utc_date
+        if reference_date.tzinfo is None:
+            reference_date = reference_date.replace(tzinfo=timezone.utc)
+
+        train_matches = finished[max(0, chunk_start - training_window_matches) : chunk_start]
+        training_data = matches_to_training_data(
+            train_matches,
+            time_decay_days=time_decay_days,
+            reference_date=reference_date,
+        )
+        if not training_data:
+            continue
+
+        model = DixonColesModel(time_decay_days=time_decay_days)
+        try:
+            model.fit(training_data)
+        except ValueError as exc:
+            logger.warning("Skipping backtest chunk starting at %s: %s", chunk_start, exc)
+            continue
+
+        for match in chunk:
+            try:
+                prediction = model.predict_match(match.home_team, match.away_team)
+            except ValueError:
+                continue
+
+            if match.home_goals > match.away_goals:
+                actual_outcome = "home"
+            elif match.home_goals == match.away_goals:
+                actual_outcome = "draw"
+            else:
+                actual_outcome = "away"
+
+            evaluated.append(
+                score_prediction(
+                    predicted_probs=(
+                        prediction.home_win_prob,
+                        prediction.draw_prob,
+                        prediction.away_win_prob,
+                    ),
+                    actual_outcome=actual_outcome,
+                    match_date=match.utc_date,
+                    match_api_id=match.api_id,
+                    predicted_score=prediction.outcome_score or prediction.most_likely_score,
+                    actual_score=f"{match.home_goals}-{match.away_goals}",
+                    over25_prob=prediction.over25_prob,
+                    btts_prob=prediction.btts_prob,
+                    baseline_probs=(
+                        baseline_probs_by_match.get(match.api_id)
+                        if baseline_probs_by_match
+                        else None
+                    ),
+                    bookmaker_probs=(
+                        bookmaker_probs_by_match.get(match.api_id)
+                        if bookmaker_probs_by_match
+                        else None
+                    ),
+                )
+            )
+
+    return evaluated
+
+
+def build_recent_snapshot_predictions(
+    matches: list[Match],
+    *,
+    predict_match: Callable[[Match], MatchPrediction | None],
+    baseline_probs_by_match: dict[int, tuple[float, float, float]] | None = None,
+    bookmaker_probs_by_match: dict[int, tuple[float, float, float]] | None = None,
+    max_evaluated_matches: int = 40,
+) -> list[EvaluatedPrediction]:
+    """Evaluate the latest saved model on recent finished matches for a fast dashboard fallback."""
+
+    finished = sorted(
+        [
+            match for match in matches
+            if match.status == "FINISHED" and match.home_goals is not None and match.away_goals is not None
+        ],
+        key=lambda match: match.utc_date,
+    )
+    if bookmaker_probs_by_match:
+        finished_with_bookmaker = [
+            match for match in finished
+            if bookmaker_probs_by_match.get(match.api_id) is not None
+        ]
+        if finished_with_bookmaker:
+            finished = finished_with_bookmaker
+
+    finished = finished[-max_evaluated_matches:]
+
+    evaluated: list[EvaluatedPrediction] = []
+    for match in finished:
+        prediction = predict_match(match)
+        if prediction is None:
+            continue
+
+        if match.home_goals > match.away_goals:
+            actual_outcome = "home"
+        elif match.home_goals == match.away_goals:
+            actual_outcome = "draw"
+        else:
+            actual_outcome = "away"
+
+        evaluated.append(
+            score_prediction(
+                predicted_probs=(
+                    prediction.home_win_prob,
+                    prediction.draw_prob,
+                    prediction.away_win_prob,
+                ),
+                actual_outcome=actual_outcome,
+                match_date=match.utc_date,
+                match_api_id=match.api_id,
+                predicted_score=prediction.outcome_score or prediction.most_likely_score,
+                actual_score=f"{match.home_goals}-{match.away_goals}",
+                over25_prob=prediction.over25_prob,
+                btts_prob=prediction.btts_prob,
+                baseline_probs=(
+                    baseline_probs_by_match.get(match.api_id)
+                    if baseline_probs_by_match
+                    else None
+                ),
+                bookmaker_probs=(
+                    bookmaker_probs_by_match.get(match.api_id)
+                    if bookmaker_probs_by_match
+                    else None
+                ),
+            )
+        )
+
+    return evaluated
 
 
 def backtest(
