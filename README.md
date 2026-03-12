@@ -93,31 +93,56 @@ To make the deployed site behave like `localhost:3000`, deploy the backend separ
 ### Recommended setup
 
 - **Frontend:** GitHub Pages
-- **Backend API:** Render, Railway, Fly.io, or another Docker-friendly host
-- **Database / MLflow:** keep using managed Postgres + your current Docker-based backend stack, or move them with the backend host
+- **Backend API:** Render web service
+- **Database:** Render PostgreSQL
+- **Scheduled refresh:** Render cron job
+- **MLflow:** optional in hosted mode; disabled in the provided Render blueprint
 
 ### What is already wired in this repo
 
 - A GitHub Pages workflow at [.github/workflows/deploy-pages.yml](.github/workflows/deploy-pages.yml)
 - Static export support for project pages like `https://gregeal.github.io/score_prediction_ml/`
 - Frontend API calls that read `NEXT_PUBLIC_API_BASE_URL` at build time
+- A Render blueprint at [render.yaml](render.yaml) for the backend API, PostgreSQL, and a twice-daily refresh job
 
-### One-time GitHub setup
+### Recommended deployment order
 
-1. Deploy your backend to a public URL, for example:
+1. Create the backend stack on Render from [render.yaml](render.yaml)
+2. Set the required backend environment variable:
+   - `FOOTBALL_DATA_API_KEY`
+3. After the backend is live, copy its public URL, for example:
    - `https://predictepl-api.onrender.com`
-2. In your GitHub repo, go to:
+4. In GitHub repo settings, add:
+   - `NEXT_PUBLIC_API_BASE_URL=https://predictepl-api.onrender.com`
+5. Let GitHub Actions deploy the frontend to:
+   - `https://gregeal.github.io/score_prediction_ml/`
+
+### GitHub Pages setup
+
+1. In your GitHub repo, go to:
    - `Settings -> Pages`
    - Set **Source** to `GitHub Actions`
-3. In your GitHub repo, go to:
+2. In your GitHub repo, go to:
    - `Settings -> Secrets and variables -> Actions -> Variables`
    - Add a repository variable named `NEXT_PUBLIC_API_BASE_URL`
    - Set it to your deployed backend origin, for example:
      - `https://predictepl-api.onrender.com`
-4. Push to `master` or `main`
+3. Push to `master` or `main`
 
 The workflow will publish the frontend to:
 - `https://gregeal.github.io/score_prediction_ml/`
+
+### Render notes
+
+- The Render blueprint uses:
+  - a `starter` web service for an always-on API
+  - a `basic-256mb` Postgres database
+  - a twice-daily cron job that runs `python scripts/run_pipeline.py`
+- The backend health check is:
+  - `/health`
+- CORS is preconfigured for:
+  - `http://localhost:3000`
+  - `https://gregeal.github.io`
 
 ### Important note
 

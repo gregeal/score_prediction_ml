@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: predictepl-api
+    runtime: python
+    rootDir: backend
+    plan: starter
+    region: ohio
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: predictepl-db
+          property: connectionString
+      - key: FOOTBALL_DATA_API_KEY
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        value: http://localhost:3000,https://gregeal.github.io
+      - key: MLFLOW_TRACKING_URI
+        value: ""
+
+  - type: cron
+    name: predictepl-daily-pipeline
+    runtime: python
+    rootDir: backend
+    plan: starter
+    region: ohio
+    schedule: "15 */12 * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scripts/run_pipeline.py
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: predictepl-db
+          property: connectionString
+      - key: FOOTBALL_DATA_API_KEY
+        sync: false
+      - key: MLFLOW_TRACKING_URI
+        value: ""
+
+databases:
+  - name: predictepl-db
+    plan: basic-256mb
+    region: ohio
+    databaseName: predictepl
+    user: predictepl
+    ipAllowList: []
