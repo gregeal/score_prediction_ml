@@ -46,6 +46,7 @@ def get_upcoming_fixtures(db: Session = Depends(get_db)):
                     "away_win": pred.away_win_prob,
                 },
                 "most_likely_score": pred.most_likely_score,
+                "outcome_score": pred.outcome_score or pred.most_likely_score,
                 "over_under_25": pred.over25_prob,
                 "btts": pred.btts_prob,
                 "confidence": pred.confidence,
