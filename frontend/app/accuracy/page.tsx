@@ -2,6 +2,8 @@
 
 import { type ReactNode, useEffect, useState } from "react";
 
+import { apiUrl } from "@/lib/api";
+
 interface SummaryData {
   active_model?: string | null;
   calibrated?: boolean;
@@ -136,7 +138,7 @@ export default function AccuracyPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/accuracy")
+    fetch(apiUrl("/api/accuracy"))
       .then((res) => res.json())
       .then((payload) => {
         setData(payload);

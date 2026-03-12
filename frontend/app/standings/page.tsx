@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { apiUrl } from "@/lib/api";
+
 interface TeamStanding {
   position: number;
   team: string;
@@ -21,7 +23,7 @@ export default function StandingsPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/standings")
+    fetch(apiUrl("/api/standings"))
       .then((res) => res.json())
       .then((data) => {
         setStandings(data.standings);

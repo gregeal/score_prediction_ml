@@ -85,6 +85,44 @@ After this:
 - **Backend API:** http://localhost:8000 (Swagger docs at /docs)
 - **MLflow UI:** http://localhost:5000
 
+## Deploying to GitHub Pages
+
+GitHub Pages can host the **Next.js frontend**, but it cannot run the FastAPI backend, PostgreSQL, or MLflow.
+To make the deployed site behave like `localhost:3000`, deploy the backend separately first, then point the frontend at that public API.
+
+### Recommended setup
+
+- **Frontend:** GitHub Pages
+- **Backend API:** Render, Railway, Fly.io, or another Docker-friendly host
+- **Database / MLflow:** keep using managed Postgres + your current Docker-based backend stack, or move them with the backend host
+
+### What is already wired in this repo
+
+- A GitHub Pages workflow at [.github/workflows/deploy-pages.yml](.github/workflows/deploy-pages.yml)
+- Static export support for project pages like `https://gregeal.github.io/score_prediction_ml/`
+- Frontend API calls that read `NEXT_PUBLIC_API_BASE_URL` at build time
+
+### One-time GitHub setup
+
+1. Deploy your backend to a public URL, for example:
+   - `https://predictepl-api.onrender.com`
+2. In your GitHub repo, go to:
+   - `Settings -> Pages`
+   - Set **Source** to `GitHub Actions`
+3. In your GitHub repo, go to:
+   - `Settings -> Secrets and variables -> Actions -> Variables`
+   - Add a repository variable named `NEXT_PUBLIC_API_BASE_URL`
+   - Set it to your deployed backend origin, for example:
+     - `https://predictepl-api.onrender.com`
+4. Push to `master` or `main`
+
+The workflow will publish the frontend to:
+- `https://gregeal.github.io/score_prediction_ml/`
+
+### Important note
+
+If `NEXT_PUBLIC_API_BASE_URL` is not set to a live backend, the GitHub Pages site will load but the predictions, accuracy dashboard, and standings will not have data.
+
 ### Local Development (without Docker)
 
 If you prefer running without Docker:

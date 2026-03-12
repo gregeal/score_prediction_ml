@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { apiUrl } from "@/lib/api";
+
 interface Prediction {
   outcome: { home_win: number; draw: number; away_win: number };
   most_likely_score: string;
@@ -167,7 +169,7 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/fixtures/upcoming")
+    fetch(apiUrl("/api/fixtures/upcoming"))
       .then((response) => {
         if (!response.ok) throw new Error("Failed to fetch fixtures");
         return response.json();
