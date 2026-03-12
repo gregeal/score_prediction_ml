@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.ml.calibration import OutcomeCalibrator
 from app.ml.challenger_model import ChallengerModel
 from app.ml.dixon_coles import DixonColesModel, MatchData
 from app.ml.elo import EloSystem
@@ -73,6 +74,7 @@ def tmp_model_dir(tmp_path):
         patch.object(predictor_module, "CHALLENGER_MODEL_PATH", tmp_path / "challenger.pkl"),
         patch.object(predictor_module, "ELO_PATH", tmp_path / "elo.pkl"),
         patch.object(predictor_module, "ACTIVE_MODEL_PATH", tmp_path / "active_model.txt"),
+        patch.object(predictor_module, "CALIBRATOR_PATH", tmp_path / "calibrator.pkl"),
     ):
         yield tmp_path
 
@@ -83,6 +85,7 @@ class TestLoadModelPersistence:
         challenger_path = tmp_model_dir / "challenger.pkl"
         elo_path = tmp_model_dir / "elo.pkl"
         active_path = tmp_model_dir / "active_model.txt"
+        calibrator_path = tmp_model_dir / "calibrator.pkl"
 
         with open(dc_path, "wb") as fh:
             pickle.dump(_fit_dummy_dc_model(), fh)
@@ -97,6 +100,14 @@ class TestLoadModelPersistence:
         with open(elo_path, "wb") as fh:
             pickle.dump(elo, fh)
 
+        calibrator = OutcomeCalibrator(min_samples=3, isotonic_min_samples=50, min_class_examples=1)
+        calibrator.fit(
+            [(0.7, 0.2, 0.1), (0.2, 0.6, 0.2), (0.1, 0.2, 0.7)],
+            ["home", "draw", "away"],
+        )
+        with open(calibrator_path, "wb") as fh:
+            pickle.dump(calibrator, fh)
+
         active_path.write_text("challenger")
 
         service = PredictionService(MagicMock())
@@ -107,6 +118,8 @@ class TestLoadModelPersistence:
         assert service.active_model == "challenger"
         assert service.challenger.is_fitted is True
         assert service.elo_system is not None
+        assert service.calibrator is not None
+        assert service.calibrator.is_fitted is True
         assert service.elo_system.get_rating("A") > service.elo_system.get_rating("B")
 
     def test_load_without_active_file_defaults_to_dc(self, tmp_model_dir):

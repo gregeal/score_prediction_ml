@@ -67,10 +67,13 @@ docker compose up -d
 # 3. Fetch EPL data (run inside the backend container)
 docker compose exec backend python scripts/fetch_data.py
 
-# 4. Train model & generate predictions
+# 4. Fetch bookmaker odds (optional, for benchmark dashboard)
+docker compose exec backend python scripts/fetch_market_odds.py
+
+# 5. Train model & generate predictions
 docker compose exec backend python scripts/train_model.py
 
-# 5. Start the frontend (in a separate terminal)
+# 6. Start the frontend (in a separate terminal)
 cd frontend
 npm install
 npm run dev
@@ -78,6 +81,7 @@ npm run dev
 
 After this:
 - **Frontend:** http://localhost:3000
+- **Accuracy Dashboard:** http://localhost:3000/accuracy
 - **Backend API:** http://localhost:8000 (Swagger docs at /docs)
 - **MLflow UI:** http://localhost:5000
 
@@ -98,9 +102,10 @@ cp .env.example .env
 #   - Add your football-data.org API key
 #   - Change DATABASE_URL to sqlite:///./predictepl.db if you don't have PostgreSQL
 
-# 3. Fetch data, train, and run
+# 3. Fetch data, bookmaker odds, train, and run
 cd backend
 python scripts/fetch_data.py
+python scripts/fetch_market_odds.py
 python scripts/train_model.py
 uvicorn app.main:app --reload --port 8000
 

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 try:
@@ -45,11 +46,12 @@ except ModuleNotFoundError:
 from app.config import settings
 from app.models.match import Match
 from app.models.prediction import Prediction
+from app.ml.calibration import OutcomeCalibrator
 from app.ml.dixon_coles import DixonColesModel, MatchPrediction
 from app.ml.challenger_model import ChallengerModel
 from app.ml.elo import EloSystem
+from app.ml.evaluate import OUTCOMES, backtest
 from app.ml.features import build_match_features, matches_to_training_data
-from app.ml.evaluate import backtest
 
 logger = logging.getLogger(__name__)
 if not MLFLOW_AVAILABLE:
@@ -60,6 +62,7 @@ DC_MODEL_PATH = MODEL_DIR / "trained_model.pkl"
 CHALLENGER_MODEL_PATH = MODEL_DIR / "challenger_model.pkl"
 ELO_PATH = MODEL_DIR / "elo_system.pkl"
 ACTIVE_MODEL_PATH = MODEL_DIR / "active_model.txt"
+CALIBRATOR_PATH = MODEL_DIR / "outcome_calibrator.pkl"
 MLFLOW_EXPERIMENT = "predictepl"
 
 
@@ -71,6 +74,7 @@ class PredictionService:
         self.dc_model = DixonColesModel(time_decay_days=365)
         self.challenger = ChallengerModel(time_decay_days=365)
         self.elo_system: EloSystem | None = None
+        self.calibrator: OutcomeCalibrator | None = None
         self.active_model = "dixon_coles"  # or "challenger"
         mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
 
@@ -134,7 +138,10 @@ class PredictionService:
             if run_evaluation and len(training_data) > 100:
                 self._evaluate_and_log(matches, challenger_trained)
 
-            # 6. Save models + active model choice
+            # 6. Fit calibrator from real historical predictions generated before matches kicked off
+            self._fit_outcome_calibrator()
+
+            # 7. Save models + active model choice
             with open(DC_MODEL_PATH, "wb") as f:
                 pickle.dump(self.dc_model, f)
             if challenger_trained:
@@ -143,9 +150,17 @@ class PredictionService:
             with open(ELO_PATH, "wb") as f:
                 pickle.dump(self.elo_system, f)
             ACTIVE_MODEL_PATH.write_text(self.active_model)
+            if self.calibrator and self.calibrator.is_fitted:
+                with open(CALIBRATOR_PATH, "wb") as f:
+                    pickle.dump(self.calibrator, f)
 
             mlflow.log_param("active_model", self.active_model)
+            mlflow.log_param("calibration_enabled", bool(self.calibrator and self.calibrator.is_fitted))
+            if self.calibrator and self.calibrator.is_fitted:
+                mlflow.log_param("calibration_version", self.calibrator.version)
             mlflow.log_artifact(str(DC_MODEL_PATH))
+            if self.calibrator and self.calibrator.is_fitted:
+                mlflow.log_artifact(str(CALIBRATOR_PATH))
 
             logger.info(
                 f"Training complete. Active model: {self.active_model}. "
@@ -261,6 +276,123 @@ class PredictionService:
         else:
             self.active_model = "dixon_coles"
 
+    def _fit_outcome_calibrator(self) -> None:
+        """Fit a calibrator from historical finished matches with stored predictions."""
+
+        latest_prediction_ids = (
+            self.db.query(
+                Prediction.match_api_id,
+                sa_func.max(Prediction.id).label("latest_id"),
+            )
+            .group_by(Prediction.match_api_id)
+            .subquery()
+        )
+
+        rows = (
+            self.db.query(Prediction, Match)
+            .join(latest_prediction_ids, Prediction.id == latest_prediction_ids.c.latest_id)
+            .join(Match, Match.api_id == Prediction.match_api_id)
+            .filter(Match.status == "FINISHED", Match.home_goals.isnot(None))
+            .order_by(Match.utc_date)
+            .all()
+        )
+
+        probabilities: list[tuple[float, float, float]] = []
+        labels: list[str] = []
+        for prediction, match in rows:
+            if prediction.model_name not in (None, self.active_model):
+                continue
+
+            raw_home = prediction.raw_home_win_prob if prediction.raw_home_win_prob is not None else prediction.home_win_prob
+            raw_draw = prediction.raw_draw_prob if prediction.raw_draw_prob is not None else prediction.draw_prob
+            raw_away = prediction.raw_away_win_prob if prediction.raw_away_win_prob is not None else prediction.away_win_prob
+            probabilities.append((float(raw_home), float(raw_draw), float(raw_away)))
+
+            if match.home_goals > match.away_goals:
+                labels.append("home")
+            elif match.home_goals == match.away_goals:
+                labels.append("draw")
+            else:
+                labels.append("away")
+
+        if not probabilities:
+            self.calibrator = None
+            if CALIBRATOR_PATH.exists():
+                CALIBRATOR_PATH.unlink()
+            return
+
+        calibrator = OutcomeCalibrator()
+        try:
+            calibrator.fit(probabilities, labels)
+        except ValueError as exc:
+            logger.info(f"Outcome calibrator skipped: {exc}")
+            self.calibrator = None
+            if CALIBRATOR_PATH.exists():
+                CALIBRATOR_PATH.unlink()
+            return
+
+        self.calibrator = calibrator
+        logger.info(
+            "Outcome calibrator fitted on %s historical predictions (%s)",
+            len(probabilities),
+            calibrator.version,
+        )
+
+    @staticmethod
+    def _confidence_label(max_probability: float) -> str:
+        if max_probability >= 0.60:
+            return "high"
+        if max_probability >= 0.45:
+            return "medium"
+        return "low"
+
+    @staticmethod
+    def _outcome_score_for_matrix(score_matrix: np.ndarray, predicted_outcome: str, fallback_score: str) -> str:
+        """Pick the most likely scoreline consistent with the served outcome probabilities."""
+
+        candidates = []
+        size = score_matrix.shape[0]
+        for home_goals in range(size):
+            for away_goals in range(size):
+                if predicted_outcome == "home" and home_goals <= away_goals:
+                    continue
+                if predicted_outcome == "draw" and home_goals != away_goals:
+                    continue
+                if predicted_outcome == "away" and home_goals >= away_goals:
+                    continue
+                candidates.append((score_matrix[home_goals, away_goals], f"{home_goals}-{away_goals}"))
+
+        if not candidates:
+            return fallback_score
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def _apply_outcome_calibration(self, prediction: MatchPrediction) -> tuple[float, float, float]:
+        """Apply 1X2 calibration to a match prediction if a calibrator is available."""
+
+        raw_probs = (
+            float(prediction.home_win_prob),
+            float(prediction.draw_prob),
+            float(prediction.away_win_prob),
+        )
+        served_probs = raw_probs
+
+        if self.calibrator and self.calibrator.is_fitted:
+            served_probs = self.calibrator.transform(raw_probs)
+
+        prediction.home_win_prob = round(float(served_probs[0]), 4)
+        prediction.draw_prob = round(float(served_probs[1]), 4)
+        prediction.away_win_prob = round(float(served_probs[2]), 4)
+        prediction.confidence = self._confidence_label(max(served_probs))
+
+        served_outcome = OUTCOMES[int(np.argmax(served_probs))]
+        prediction.outcome_score = self._outcome_score_for_matrix(
+            prediction.score_matrix,
+            served_outcome,
+            prediction.most_likely_score,
+        )
+        return raw_probs
+
     def load_model(self) -> None:
         """Load previously trained models from disk."""
         if not DC_MODEL_PATH.exists():
@@ -273,6 +405,9 @@ class PredictionService:
         if ELO_PATH.exists():
             with open(ELO_PATH, "rb") as f:
                 self.elo_system = pickle.load(f)
+        if CALIBRATOR_PATH.exists():
+            with open(CALIBRATOR_PATH, "rb") as f:
+                self.calibrator = pickle.load(f)
         if ACTIVE_MODEL_PATH.exists():
             self.active_model = ACTIVE_MODEL_PATH.read_text().strip()
         logger.info(f"Models loaded. Active: {self.active_model}")
@@ -312,6 +447,7 @@ class PredictionService:
                 else:
                     pred = self.dc_model.predict_match(match.home_team, match.away_team)
 
+                raw_probs = self._apply_outcome_calibration(pred)
                 predictions.append(pred)
 
                 # Delete any previous prediction for this match
@@ -326,6 +462,9 @@ class PredictionService:
                     away_team=match.away_team,
                     predicted_home_goals=float(pred.predicted_home_goals),
                     predicted_away_goals=float(pred.predicted_away_goals),
+                    raw_home_win_prob=float(raw_probs[0]),
+                    raw_draw_prob=float(raw_probs[1]),
+                    raw_away_win_prob=float(raw_probs[2]),
                     home_win_prob=float(pred.home_win_prob),
                     draw_prob=float(pred.draw_prob),
                     away_win_prob=float(pred.away_win_prob),
@@ -334,6 +473,9 @@ class PredictionService:
                     most_likely_score=pred.most_likely_score,
                     outcome_score=pred.outcome_score,
                     confidence=pred.confidence,
+                    model_name=self.active_model,
+                    model_version=self.active_model,
+                    calibration_version=self.calibrator.version if self.calibrator and self.calibrator.is_fitted else None,
                 )
                 self.db.add(db_pred)
             except (ValueError, KeyError) as e:

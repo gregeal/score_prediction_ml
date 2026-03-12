@@ -9,7 +9,7 @@ import requests
 # Add backend to path so we can import app modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.models.base import Base, get_engine, get_session_local
+from app.models.base import ensure_database_ready, get_session_local
 from app.models.match import Match
 from app.services.data_fetcher import FootballDataFetcher
 
@@ -54,8 +54,8 @@ def sync_parsed_matches(db, parsed_matches: list[dict]) -> tuple[int, int]:
 
 
 def main():
-    # Create tables
-    Base.metadata.create_all(bind=get_engine())
+    # Create tables and backfill any newly added nullable columns.
+    ensure_database_ready()
     logger.info("Database tables created")
 
     fetcher = FootballDataFetcher()
