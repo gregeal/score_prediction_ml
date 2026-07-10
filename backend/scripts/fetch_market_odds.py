@@ -17,7 +17,7 @@ from app.services.odds_provider import SportsBettingOddsFetcher
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-SEASONS = [2022, 2023, 2024, 2025]
+SEASONS = [2022, 2023, 2024, 2025, 2026]
 
 
 def sync_market_odds(db, odds_rows: list[dict]) -> tuple[int, int]:

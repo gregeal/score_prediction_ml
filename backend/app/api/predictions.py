@@ -6,12 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
-from app.ml.evaluate import build_dashboard_result, build_recent_snapshot_predictions, score_prediction
+from app.api.fixtures import iso_utc
+from app.ml.evaluate import build_dashboard_result, build_recent_backtest_predictions, score_prediction
 from app.models.base import get_db
 from app.models.market_odds import MarketOdds
 from app.models.match import Match
 from app.models.prediction import Prediction
-from app.services.predictor import PredictionService
 
 router = APIRouter(tags=["predictions"])
 
@@ -91,7 +91,7 @@ def get_prediction(match_api_id: int, db: Session = Depends(get_db)):
         "match": {
             "home": prediction.home_team,
             "away": prediction.away_team,
-            "date": match.utc_date.isoformat() if match else None,
+            "date": iso_utc(match.utc_date) if match else None,
             "matchday": match.matchday if match else None,
         },
         "predictions": {
@@ -194,48 +194,25 @@ def get_accuracy(db: Session = Depends(get_db)):
                 )
             )
     else:
-        try:
-            service = PredictionService(db)
-            service.load_model()
-            finished_desc = sorted(finished_matches, key=lambda match: match.utc_date, reverse=True)
-
-            def predict_finished_match(match: Match):
-                try:
-                    if (
-                        service.active_model == "challenger"
-                        and service.challenger.is_fitted
-                        and service.elo_system is not None
-                    ):
-                        pred = service.challenger.predict_match(
-                            match.home_team,
-                            match.away_team,
-                            service.elo_system,
-                            finished_desc,
-                            reference_date=match.utc_date,
-                        )
-                    else:
-                        pred = service.dc_model.predict_match(match.home_team, match.away_team)
-                    service._apply_outcome_calibration(pred)
-                    return pred
-                except (ValueError, KeyError):
-                    return None
-
-            evaluated = build_recent_snapshot_predictions(
-                finished_matches,
-                predict_match=predict_finished_match,
-                baseline_probs_by_match=priors,
-                bookmaker_probs_by_match=bookmaker_probs_by_match,
+        # No stored predictions with finished matches yet (e.g. season start).
+        # Use an honest walk-forward backtest: each chunk is predicted by a
+        # model trained only on earlier matches. The previous snapshot
+        # approach scored the saved model on matches it was trained on (and
+        # let challenger features see the evaluated match's own result),
+        # systematically overstating accuracy.
+        evaluated = build_recent_backtest_predictions(
+            finished_matches,
+            baseline_probs_by_match=priors,
+            bookmaker_probs_by_match=bookmaker_probs_by_match,
+        )
+        evaluation_source = "walk_forward_backtest"
+        if evaluated:
+            message = (
+                "Showing a walk-forward backtest on recent finished matches until enough "
+                "predicted fixtures have finished for live evaluation."
             )
-            evaluation_source = "model_snapshot"
-            if evaluated:
-                message = (
-                    "Showing a recent snapshot benchmark from the saved model until enough predicted "
-                    "fixtures have finished for live evaluation."
-                )
-            else:
-                return {"total_evaluated": 0, "message": "No finished matches with predictions or snapshot data yet"}
-        except FileNotFoundError:
-            return {"total_evaluated": 0, "message": "No finished matches with predictions or saved model artifacts yet"}
+        else:
+            return {"total_evaluated": 0, "message": "No finished matches with predictions or backtest data yet"}
 
     dashboard = build_dashboard_result(evaluated)
     latest_prediction = (

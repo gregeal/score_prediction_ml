@@ -136,22 +136,39 @@ function Section({
 export default function AccuracyPage() {
   const [data, setData] = useState<AccuracyData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch(apiUrl("/api/accuracy"))
-      .then((res) => res.json())
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`API responded with status ${res.status}`);
+        }
+        return res.json();
+      })
       .then((payload) => {
         setData(payload);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch(() => {
+        setError("Could not reach the prediction API. Please try again shortly.");
+        setLoading(false);
+      });
   }, []);
 
   if (loading) {
     return <div className="py-12 text-center text-slate-400">Loading accuracy data...</div>;
   }
 
-  if (!data || data.total_evaluated === 0) {
+  if (error) {
+    return (
+      <div className="rounded-3xl border border-rose-500/30 bg-slate-950/80 p-8 text-center text-rose-300">
+        {error}
+      </div>
+    );
+  }
+
+  if (!data?.total_evaluated) {
     return (
       <div className="space-y-6">
         <div>

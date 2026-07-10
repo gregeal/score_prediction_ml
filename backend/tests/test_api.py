@@ -165,6 +165,13 @@ class TestFixturesEndpoints:
         assert fixture["prediction"] is not None
         assert fixture["prediction"]["confidence"] == "medium"
 
+    def test_upcoming_dates_carry_utc_offset(self, client, seed_data):
+        """Offset-less ISO strings are parsed as LOCAL time by JS Date,
+        shifting every displayed kickoff by the viewer's UTC offset."""
+        response = client.get("/api/fixtures/upcoming")
+        date = response.json()["fixtures"][0]["date"]
+        assert date.endswith("+00:00") or date.endswith("Z")
+
     def test_standings_empty(self, client):
         response = client.get("/api/standings")
         assert response.status_code == 200
@@ -217,7 +224,7 @@ class TestPredictionEndpoints:
         assert data["benchmarks"]["naive"]["available"] is True
         assert data["benchmarks"]["bookmaker"]["available"] is True
 
-    def test_accuracy_falls_back_to_snapshot_metrics(self, client, monkeypatch):
+    def test_accuracy_falls_back_to_walk_forward_backtest(self, client, monkeypatch):
         db = TestSession()
         db.add(
             Match(
@@ -250,7 +257,7 @@ class TestPredictionEndpoints:
 
         monkeypatch.setattr(
             predictions_api,
-            "build_recent_snapshot_predictions",
+            "build_recent_backtest_predictions",
             lambda *args, **kwargs: [
                 score_prediction(
                     predicted_probs=(0.56, 0.24, 0.20),
@@ -262,13 +269,12 @@ class TestPredictionEndpoints:
                 )
             ],
         )
-        monkeypatch.setattr(predictions_api.PredictionService, "load_model", lambda self: None)
 
         response = client.get("/api/accuracy")
         assert response.status_code == 200
         data = response.json()
 
         assert data["total_evaluated"] == 1
-        assert data["summary"]["evaluation_source"] == "model_snapshot"
-        assert "saved model" in data["message"]
+        assert data["summary"]["evaluation_source"] == "walk_forward_backtest"
+        assert "walk-forward backtest" in data["message"]
         assert data["benchmarks"]["model"]["available"] is True

@@ -6,19 +6,35 @@ The Dixon-Coles model extends the independent Poisson model by:
 3. Applying a correction factor (rho) for low-scoring outcomes
 4. Using time-weighted maximum likelihood estimation
 
+This implementation fits by fully vectorized penalized maximum likelihood:
+the log-likelihood is computed with numpy over all matches at once and
+optimized with L-BFGS-B, which is several orders of magnitude faster than
+a per-match Python loop under SLSQP. A small L2 penalty shrinks attack and
+defense strengths toward the league average, which keeps parameters sane
+for teams with very few observed matches (e.g. newly promoted sides early
+in a season).
+
 Reference: Dixon, M.J. & Coles, S.G. (1997) "Modelling Association Football
 Scores and Inefficiencies in the Football Betting Market"
 """
 
+import logging
 import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.optimize import minimize
+from scipy.special import gammaln
 from scipy.stats import poisson
 
+logger = logging.getLogger(__name__)
 
 MAX_GOALS = 10  # Max goals to consider in score matrix
+
+# tau factors are clipped to this floor inside the log-likelihood so that
+# parameter regions where the Dixon-Coles correction becomes invalid
+# (tau <= 0) are heavily penalized but never produce log(<=0).
+_TAU_FLOOR = 1e-10
 
 
 @dataclass
@@ -58,6 +74,10 @@ class ModelParams:
     defense: dict[str, float]  # Team -> defense strength
     home_advantage: float
     rho: float  # Dixon-Coles low-score correction
+    # Fallback strengths served for teams absent from training data
+    # (e.g. newly promoted sides before their first finished match).
+    default_attack: float = 0.0
+    default_defense: float = 0.0
 
 
 def _tau(x: int, y: int, lambda_: float, mu: float, rho: float) -> float:
@@ -79,82 +99,25 @@ def _tau(x: int, y: int, lambda_: float, mu: float, rho: float) -> float:
         return 1.0
 
 
-def _match_log_likelihood(
-    home_goals: int,
-    away_goals: int,
-    home_attack: float,
-    home_defense: float,
-    away_attack: float,
-    away_defense: float,
-    home_adv: float,
-    rho: float,
-    weight: float = 1.0,
-) -> float:
-    """Compute log-likelihood of a single match result."""
-    lambda_ = np.exp(home_attack + away_defense + home_adv)  # Expected home goals
-    mu = np.exp(away_attack + home_defense)  # Expected away goals
-
-    # Poisson probabilities
-    home_prob = poisson.pmf(home_goals, lambda_)
-    away_prob = poisson.pmf(away_goals, mu)
-
-    # Dixon-Coles correction
-    tau = _tau(home_goals, away_goals, lambda_, mu, rho)
-
-    prob = tau * home_prob * away_prob
-    if prob <= 0:
-        return -30.0 * weight  # Avoid log(0)
-
-    return weight * np.log(prob)
-
-
-def _neg_log_likelihood(params: np.ndarray, matches: list[MatchData], teams: list[str]) -> float:
-    """Negative log-likelihood for all matches (to minimize).
-
-    Parameter layout:
-      params[0:n]     = attack strengths for each team
-      params[n:2n]    = defense strengths for each team
-      params[2n]      = home advantage
-      params[2n+1]    = rho (Dixon-Coles correction)
-    """
-    n = len(teams)
-    team_idx = {team: i for i, team in enumerate(teams)}
-
-    attack = params[:n]
-    defense = params[n : 2 * n]
-    home_adv = params[2 * n]
-    rho = params[2 * n + 1]
-
-    log_lik = 0.0
-    for match in matches:
-        hi = team_idx[match.home_team]
-        ai = team_idx[match.away_team]
-        log_lik += _match_log_likelihood(
-            match.home_goals,
-            match.away_goals,
-            attack[hi],
-            defense[hi],
-            attack[ai],
-            defense[ai],
-            home_adv,
-            rho,
-            match.weight,
-        )
-
-    return -log_lik
-
-
 class DixonColesModel:
     """Dixon-Coles model for EPL score prediction."""
 
-    def __init__(self, time_decay_days: int = 365):
+    def __init__(self, time_decay_days: int = 540, l2_reg: float = 5.0):
         """Initialize the model.
 
         Args:
             time_decay_days: Half-life for time weighting in days.
                 Matches older than this get half the weight.
+            l2_reg: L2 penalty strength on attack/defense parameters.
+                Shrinks strengths toward the league average; mainly
+                stabilizes teams with few observed matches.
+
+        Defaults were selected by walk-forward backtest over the most recent
+        380 finished matches (see scripts/benchmark_model.py): half_life=540
+        with l2_reg=5.0 gave the best Brier score and log loss.
         """
         self.time_decay_days = time_decay_days
+        self.l2_reg = l2_reg
         self.params: ModelParams | None = None
 
     def fit(self, matches: list[MatchData]) -> ModelParams:
@@ -166,58 +129,138 @@ class DixonColesModel:
         Returns:
             Fitted ModelParams.
         """
+        if not matches:
+            raise ValueError("No matches provided to fit()")
+
         teams = sorted(set(
             [m.home_team for m in matches] + [m.away_team for m in matches]
         ))
         n = len(teams)
+        team_idx = {team: i for i, team in enumerate(teams)}
 
-        # Initial params: zero attack/defense, small home advantage, zero rho
+        # Precompute vectorized match arrays
+        home_idx = np.array([team_idx[m.home_team] for m in matches], dtype=np.intp)
+        away_idx = np.array([team_idx[m.away_team] for m in matches], dtype=np.intp)
+        home_goals = np.array([m.home_goals for m in matches], dtype=np.float64)
+        away_goals = np.array([m.away_goals for m in matches], dtype=np.float64)
+        weights = np.array([m.weight for m in matches], dtype=np.float64)
+
+        # Constant terms of the Poisson log-pmf
+        log_factorials = gammaln(home_goals + 1.0) + gammaln(away_goals + 1.0)
+
+        # Masks for the four scorelines the tau correction touches
+        mask_00 = (home_goals == 0) & (away_goals == 0)
+        mask_01 = (home_goals == 0) & (away_goals == 1)
+        mask_10 = (home_goals == 1) & (away_goals == 0)
+        mask_11 = (home_goals == 1) & (away_goals == 1)
+
+        l2_reg = self.l2_reg
+
+        def neg_log_likelihood(params: np.ndarray) -> float:
+            attack = params[:n]
+            defense = params[n:2 * n]
+            home_adv = params[2 * n]
+            rho = params[2 * n + 1]
+
+            log_lambda = attack[home_idx] + defense[away_idx] + home_adv
+            log_mu = attack[away_idx] + defense[home_idx]
+            lambda_ = np.exp(log_lambda)
+            mu = np.exp(log_mu)
+
+            log_lik = (
+                home_goals * log_lambda - lambda_
+                + away_goals * log_mu - mu
+                - log_factorials
+            )
+
+            tau = np.ones_like(lambda_)
+            tau[mask_00] = 1.0 - lambda_[mask_00] * mu[mask_00] * rho
+            tau[mask_01] = 1.0 + lambda_[mask_01] * rho
+            tau[mask_10] = 1.0 + mu[mask_10] * rho
+            tau[mask_11] = 1.0 - rho
+            log_lik += np.log(np.clip(tau, _TAU_FLOOR, None))
+
+            penalty = l2_reg * (np.dot(attack, attack) + np.dot(defense, defense))
+            return -np.dot(weights, log_lik) + penalty
+
+        # Initial params: zero attack/defense, small home advantage, small rho
         x0 = np.zeros(2 * n + 2)
-        x0[2 * n] = 0.25  # Initial home advantage
-        x0[2 * n + 1] = -0.05  # Initial rho
+        x0[2 * n] = 0.25
+        x0[2 * n + 1] = -0.05
 
-        # Constraint: sum of attack strengths = 0 (identifiability)
-        constraints = [
-            {"type": "eq", "fun": lambda p, n=n: np.sum(p[:n])}
-        ]
-
-        # Bounds: rho between -1 and 1
-        bounds = [(None, None)] * (2 * n)  # attack + defense: unbounded
-        bounds.append((None, None))  # home advantage: unbounded
-        bounds.append((-1.0, 1.0))  # rho: bounded
+        # Attack/defense bounded generously (exp(3) ~ 20 goals); rho kept in a
+        # range where the tau correction stays a valid probability adjustment
+        # for realistic scoring rates.
+        bounds = [(-3.0, 3.0)] * (2 * n) + [(-1.0, 1.0), (-0.5, 0.5)]
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             result = minimize(
-                _neg_log_likelihood,
+                neg_log_likelihood,
                 x0,
-                args=(matches, teams),
-                method="SLSQP",
-                constraints=constraints,
+                method="L-BFGS-B",
                 bounds=bounds,
-                options={"maxiter": 500, "ftol": 1e-8},
+                options={"maxiter": 500},
             )
 
         if not result.success:
             warnings.warn(f"Optimization did not converge: {result.message}")
 
-        # Extract parameters
-        attack = {team: result.x[i] for i, team in enumerate(teams)}
-        defense = {team: result.x[n + i] for i, team in enumerate(teams)}
-        home_adv = result.x[2 * n]
-        rho = result.x[2 * n + 1]
+        # The likelihood is invariant under attack += c, defense -= c.
+        # Fix the gauge so attack strengths average to zero (identifiability),
+        # matching the constraint the original SLSQP formulation imposed.
+        attack_arr = result.x[:n].copy()
+        defense_arr = result.x[n:2 * n].copy()
+        shift = attack_arr.mean()
+        attack_arr -= shift
+        defense_arr += shift
+
+        attack = {team: float(attack_arr[i]) for i, team in enumerate(teams)}
+        defense = {team: float(defense_arr[i]) for i, team in enumerate(teams)}
+
+        # Fallback strengths for unknown (e.g. newly promoted) teams: the
+        # average of the three weakest teams by net strength. Promoted sides
+        # historically perform like the bottom of the league.
+        net_strength = attack_arr - defense_arr
+        weakest = np.argsort(net_strength)[:min(3, n)]
+        default_attack = float(attack_arr[weakest].mean())
+        default_defense = float(defense_arr[weakest].mean())
 
         self.params = ModelParams(
             teams=teams,
             attack=attack,
             defense=defense,
-            home_advantage=home_adv,
-            rho=rho,
+            home_advantage=float(result.x[2 * n]),
+            rho=float(result.x[2 * n + 1]),
+            default_attack=default_attack,
+            default_defense=default_defense,
         )
         return self.params
 
+    def is_known_team(self, team: str) -> bool:
+        """Whether the team was present in the training data."""
+        return self.params is not None and team in self.params.attack
+
+    def _team_strengths(self, team: str) -> tuple[float, float]:
+        """Attack/defense for a team, falling back to promoted-team defaults."""
+        if team in self.params.attack:
+            return self.params.attack[team], self.params.defense[team]
+        warned = getattr(self, "_warned_unknown_teams", None)
+        if warned is None:
+            warned = self._warned_unknown_teams = set()
+        if team not in warned:
+            warned.add(team)
+            logger.warning(
+                "Team %r not in training data; using promoted-team default strengths",
+                team,
+            )
+        return self.params.default_attack, self.params.default_defense
+
     def predict_match(self, home_team: str, away_team: str) -> MatchPrediction:
         """Predict the outcome of a match.
+
+        Teams unseen in training (e.g. newly promoted sides) are assigned
+        the fallback strengths estimated in fit() rather than raising.
 
         Args:
             home_team: Name of the home team.
@@ -227,26 +270,17 @@ class DixonColesModel:
             MatchPrediction with all derived prediction types.
 
         Raises:
-            ValueError: If model is not fitted or team is unknown.
+            ValueError: If model is not fitted.
         """
         if self.params is None:
             raise ValueError("Model not fitted. Call fit() first.")
 
-        if home_team not in self.params.attack:
-            raise ValueError(f"Unknown team: {home_team}")
-        if away_team not in self.params.attack:
-            raise ValueError(f"Unknown team: {away_team}")
+        home_attack, home_defense = self._team_strengths(home_team)
+        away_attack, away_defense = self._team_strengths(away_team)
 
         # Expected goals
-        lambda_ = np.exp(
-            self.params.attack[home_team]
-            + self.params.defense[away_team]
-            + self.params.home_advantage
-        )
-        mu = np.exp(
-            self.params.attack[away_team]
-            + self.params.defense[home_team]
-        )
+        lambda_ = np.exp(home_attack + away_defense + self.params.home_advantage)
+        mu = np.exp(away_attack + home_defense)
 
         # Build score probability matrix
         score_matrix = self._calculate_score_matrix(lambda_, mu)
@@ -256,8 +290,8 @@ class DixonColesModel:
             home_team=home_team,
             away_team=away_team,
             score_matrix=score_matrix,
-            predicted_home_goals=round(lambda_, 2),
-            predicted_away_goals=round(mu, 2),
+            predicted_home_goals=round(float(lambda_), 2),
+            predicted_away_goals=round(float(mu), 2),
         )
 
         self._derive_predictions(prediction, score_matrix)
@@ -274,15 +308,20 @@ class DixonColesModel:
             (MAX_GOALS x MAX_GOALS) numpy array of score probabilities.
         """
         rho = self.params.rho if self.params else 0.0
-        matrix = np.zeros((MAX_GOALS, MAX_GOALS))
 
-        for i in range(MAX_GOALS):
-            for j in range(MAX_GOALS):
-                base_prob = poisson.pmf(i, lambda_) * poisson.pmf(j, mu)
-                tau = _tau(i, j, lambda_, mu, rho)
-                matrix[i, j] = base_prob * tau
+        home_probs = poisson.pmf(np.arange(MAX_GOALS), lambda_)
+        away_probs = poisson.pmf(np.arange(MAX_GOALS), mu)
+        matrix = np.outer(home_probs, away_probs)
 
-        # Normalize to ensure probabilities sum to 1
+        matrix[0, 0] *= 1.0 - lambda_ * mu * rho
+        matrix[0, 1] *= 1.0 + lambda_ * rho
+        matrix[1, 0] *= 1.0 + mu * rho
+        matrix[1, 1] *= 1.0 - rho
+
+        # The tau correction can push individual cells negative when rho is
+        # outside its validity range for extreme lambda/mu; clip before
+        # normalizing so the matrix is a valid probability distribution.
+        matrix = np.clip(matrix, 0.0, None)
         matrix /= matrix.sum()
         return matrix
 
@@ -293,38 +332,21 @@ class DixonColesModel:
         Modifies prediction in place.
         """
         n = matrix.shape[0]
+        home_idx, away_idx = np.indices((n, n))
 
-        # 1X2 outcome probabilities
-        home_win = 0.0
-        draw = 0.0
-        away_win = 0.0
-        for i in range(n):
-            for j in range(n):
-                if i > j:
-                    home_win += matrix[i, j]
-                elif i == j:
-                    draw += matrix[i, j]
-                else:
-                    away_win += matrix[i, j]
+        home_win = float(matrix[home_idx > away_idx].sum())
+        draw = float(matrix[home_idx == away_idx].sum())
+        away_win = float(matrix[home_idx < away_idx].sum())
 
         prediction.home_win_prob = round(home_win, 4)
         prediction.draw_prob = round(draw, 4)
         prediction.away_win_prob = round(away_win, 4)
 
         # Over/Under 2.5 goals
-        over25 = 0.0
-        for i in range(n):
-            for j in range(n):
-                if i + j > 2:
-                    over25 += matrix[i, j]
-        prediction.over25_prob = round(over25, 4)
+        prediction.over25_prob = round(float(matrix[home_idx + away_idx > 2].sum()), 4)
 
         # Both Teams To Score (BTTS)
-        btts = 0.0
-        for i in range(1, n):
-            for j in range(1, n):
-                btts += matrix[i, j]
-        prediction.btts_prob = round(btts, 4)
+        prediction.btts_prob = round(float(matrix[1:, 1:].sum()), 4)
 
         # Top 5 most likely exact scores
         scores = []
@@ -332,7 +354,7 @@ class DixonColesModel:
             for j in range(n):
                 scores.append((f"{i}-{j}", matrix[i, j], i, j))
         scores.sort(key=lambda x: x[1], reverse=True)
-        prediction.top_scores = [(s, round(p, 4)) for s, p, _, _ in scores[:5]]
+        prediction.top_scores = [(s, round(float(p), 4)) for s, p, _, _ in scores[:5]]
         prediction.most_likely_score = scores[0][0]
 
         # Most likely score consistent with the predicted outcome

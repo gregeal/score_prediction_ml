@@ -1,6 +1,7 @@
-"""Prediction service: orchestrates model training and prediction generation."""
+﻿"""Prediction service: orchestrates model training and prediction generation."""
 
 import logging
+import os
 import pickle
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,38 +10,46 @@ import numpy as np
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
+# Fail fast when the MLflow tracking server is unreachable instead of
+# stalling training for minutes in exponential-backoff retries. Users can
+# still override these through their environment.
+os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "2")
+os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "10")
+
+
+class _NoOpRun:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _NoOpMlflow:
+    def set_tracking_uri(self, *args, **kwargs):
+        pass
+
+    def set_experiment(self, *args, **kwargs):
+        pass
+
+    def start_run(self, *args, **kwargs):
+        return _NoOpRun()
+
+    def log_param(self, *args, **kwargs):
+        pass
+
+    def log_metric(self, *args, **kwargs):
+        pass
+
+    def log_artifact(self, *args, **kwargs):
+        pass
+
+
 try:
     import mlflow
     MLFLOW_AVAILABLE = True
 except ModuleNotFoundError:
     MLFLOW_AVAILABLE = False
-
-    class _NoOpRun:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    class _NoOpMlflow:
-        def set_tracking_uri(self, *args, **kwargs):
-            pass
-
-        def set_experiment(self, *args, **kwargs):
-            pass
-
-        def start_run(self, *args, **kwargs):
-            return _NoOpRun()
-
-        def log_param(self, *args, **kwargs):
-            pass
-
-        def log_metric(self, *args, **kwargs):
-            pass
-
-        def log_artifact(self, *args, **kwargs):
-            pass
-
     mlflow = _NoOpMlflow()
 
 from app.config import settings
@@ -71,8 +80,10 @@ class PredictionService:
 
     def __init__(self, db: Session):
         self.db = db
-        self.dc_model = DixonColesModel(time_decay_days=365)
-        self.challenger = ChallengerModel(time_decay_days=365)
+        self._mlflow_override = None  # set to a no-op when tracking is unreachable
+        # Defaults tuned by scripts/benchmark_model.py (walk-forward Brier)
+        self.dc_model = DixonColesModel()
+        self.challenger = ChallengerModel(time_decay_days=540)
         self.elo_system: EloSystem | None = None
         self.calibrator: OutcomeCalibrator | None = None
         self.active_model = "dixon_coles"  # or "challenger"
@@ -83,6 +94,12 @@ class PredictionService:
     def model(self):
         """Backward compat: return the active Dixon-Coles model."""
         return self.dc_model
+
+    @property
+    def _mlflow(self):
+        """MLflow logger, resolved lazily so an unreachable tracking server
+        can be swapped for a no-op and tests can patch the module global."""
+        return self._mlflow_override if self._mlflow_override is not None else mlflow
 
     def train_model(self, run_evaluation: bool = True) -> None:
         """Train both models on all finished matches in the database."""
@@ -104,7 +121,7 @@ class PredictionService:
         self.elo_system = EloSystem.from_matches(matches)
         logger.info(f"Elo ratings computed for {len(self.elo_system.ratings)} teams")
 
-        # 3. Train Challenger (needs enough data — 200+ matches for reliable GBM)
+        # 3. Train Challenger (needs enough data - 200+ matches for reliable GBM)
         challenger_trained = False
         if len(training_data) >= 200:
             try:
@@ -116,24 +133,34 @@ class PredictionService:
         else:
             logger.info(f"Challenger skipped: only {len(training_data)} matches (need 200+)")
 
-        # 4. Log to MLflow
-        mlflow.set_experiment(MLFLOW_EXPERIMENT)
-        with mlflow.start_run(run_name="train"):
-            mlflow.log_param("dc_time_decay_days", self.dc_model.time_decay_days)
-            mlflow.log_param("num_training_matches", len(training_data))
+        # 4. Log to MLflow. An unreachable tracking server must never abort
+        # training - degrade to no-op logging instead.
+        self._mlflow_override = None
+        try:
+            self._mlflow.set_experiment(MLFLOW_EXPERIMENT)
+        except Exception as exc:
+            logger.warning(
+                "MLflow tracking unavailable (%s); continuing without experiment logging",
+                exc,
+            )
+            self._mlflow_override = _NoOpMlflow()
+        mlflow_log = self._mlflow
+        with mlflow_log.start_run(run_name="train"):
+            mlflow_log.log_param("dc_time_decay_days", self.dc_model.time_decay_days)
+            mlflow_log.log_param("num_training_matches", len(training_data))
             num_teams = len(set(m.home_team for m in training_data) | set(m.away_team for m in training_data))
-            mlflow.log_param("num_teams", num_teams)
-            mlflow.log_param("challenger_trained", challenger_trained)
+            mlflow_log.log_param("num_teams", num_teams)
+            mlflow_log.log_param("challenger_trained", challenger_trained)
 
-            mlflow.log_metric("dc_home_advantage", dc_params.home_advantage)
-            mlflow.log_metric("dc_rho", dc_params.rho)
+            mlflow_log.log_metric("dc_home_advantage", dc_params.home_advantage)
+            mlflow_log.log_metric("dc_rho", dc_params.rho)
 
             # Log Elo ratings for top/bottom teams
             if self.elo_system:
                 sorted_elo = sorted(self.elo_system.ratings.items(), key=lambda x: x[1], reverse=True)
                 for team, rating in sorted_elo[:5]:
                     safe = "".join(c if c.isalnum() or c in "_-." else "" for c in team).replace(" ", "_")
-                    mlflow.log_metric(f"elo_{safe}", rating)
+                    mlflow_log.log_metric(f"elo_{safe}", rating)
 
             # 5. Evaluate and pick best model
             if run_evaluation and len(training_data) > 100:
@@ -155,13 +182,13 @@ class PredictionService:
                 with open(CALIBRATOR_PATH, "wb") as f:
                     pickle.dump(self.calibrator, f)
 
-            mlflow.log_param("active_model", self.active_model)
-            mlflow.log_param("calibration_enabled", bool(self.calibrator and self.calibrator.is_fitted))
+            mlflow_log.log_param("active_model", self.active_model)
+            mlflow_log.log_param("calibration_enabled", bool(self.calibrator and self.calibrator.is_fitted))
             if self.calibrator and self.calibrator.is_fitted:
-                mlflow.log_param("calibration_version", self.calibrator.version)
-            mlflow.log_artifact(str(DC_MODEL_PATH))
+                mlflow_log.log_param("calibration_version", self.calibrator.version)
+            mlflow_log.log_artifact(str(DC_MODEL_PATH))
             if self.calibrator and self.calibrator.is_fitted:
-                mlflow.log_artifact(str(CALIBRATOR_PATH))
+                mlflow_log.log_artifact(str(CALIBRATOR_PATH))
 
             logger.info(
                 f"Training complete. Active model: {self.active_model}. "
@@ -184,12 +211,12 @@ class PredictionService:
         dc_eval = DixonColesModel(time_decay_days=self.dc_model.time_decay_days)
         try:
             dc_result = backtest(dc_eval, train_split, test_split)
-            mlflow.log_metric("dc_outcome_accuracy", dc_result.outcome_accuracy)
-            mlflow.log_metric("dc_brier_score", dc_result.brier_score)
-            mlflow.log_metric("dc_log_loss", dc_result.avg_log_loss)
-            mlflow.log_metric("dc_over25_accuracy", dc_result.over25_accuracy)
-            mlflow.log_metric("dc_btts_accuracy", dc_result.btts_accuracy)
-            mlflow.log_metric("dc_test_matches", dc_result.total_matches)
+            self._mlflow.log_metric("dc_outcome_accuracy", dc_result.outcome_accuracy)
+            self._mlflow.log_metric("dc_brier_score", dc_result.brier_score)
+            self._mlflow.log_metric("dc_log_loss", dc_result.avg_log_loss)
+            self._mlflow.log_metric("dc_over25_accuracy", dc_result.over25_accuracy)
+            self._mlflow.log_metric("dc_btts_accuracy", dc_result.btts_accuracy)
+            self._mlflow.log_metric("dc_test_matches", dc_result.total_matches)
             logger.info(
                 f"DC eval: outcome={dc_result.outcome_accuracy:.1%}, "
                 f"brier={dc_result.brier_score:.4f}"
@@ -262,9 +289,9 @@ class PredictionService:
         if challenger_total > 0:
             gbm_accuracy = round(challenger_correct / challenger_total, 4)
             gbm_brier = round(float(np.mean(challenger_brier)), 4)
-            mlflow.log_metric("gbm_outcome_accuracy", gbm_accuracy)
-            mlflow.log_metric("gbm_brier_score", gbm_brier)
-            mlflow.log_metric("gbm_test_matches", challenger_total)
+            self._mlflow.log_metric("gbm_outcome_accuracy", gbm_accuracy)
+            self._mlflow.log_metric("gbm_brier_score", gbm_brier)
+            self._mlflow.log_metric("gbm_test_matches", challenger_total)
             logger.info(f"GBM eval: outcome={gbm_accuracy:.1%}, brier={gbm_brier:.4f}")
 
             # Pick winner
@@ -436,16 +463,25 @@ class PredictionService:
         predictions = []
         for match in upcoming:
             try:
+                model_used = "dixon_coles"
+                pred = None
                 if self.active_model == "challenger" and self.challenger.is_fitted and sorted_desc:
                     match_date = match.utc_date
                     if match_date.tzinfo is None:
                         match_date = match_date.replace(tzinfo=timezone.utc)
-                    pred = self.challenger.predict_match(
-                        match.home_team, match.away_team,
-                        self.elo_system, sorted_desc,
-                        reference_date=match_date,
-                    )
-                else:
+                    try:
+                        pred = self.challenger.predict_match(
+                            match.home_team, match.away_team,
+                            self.elo_system, sorted_desc,
+                            reference_date=match_date,
+                        )
+                        model_used = "challenger"
+                    except (ValueError, KeyError) as e:
+                        logger.warning(
+                            f"Challenger failed for {match.home_team} vs {match.away_team}, "
+                            f"falling back to Dixon-Coles: {e}"
+                        )
+                if pred is None:
                     pred = self.dc_model.predict_match(match.home_team, match.away_team)
 
                 raw_probs = self._apply_outcome_calibration(pred)
@@ -474,8 +510,8 @@ class PredictionService:
                     most_likely_score=pred.most_likely_score,
                     outcome_score=pred.outcome_score,
                     confidence=pred.confidence,
-                    model_name=self.active_model,
-                    model_version=self.active_model,
+                    model_name=model_used,
+                    model_version=model_used,
                     calibration_version=self.calibrator.version if self.calibrator and self.calibrator.is_fitted else None,
                 )
                 self.db.add(db_pred)

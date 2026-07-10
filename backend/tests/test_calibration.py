@@ -1,8 +1,17 @@
 """Tests for 1X2 probability calibration."""
 
+import numpy as np
 import pytest
 
-from app.ml.calibration import OutcomeCalibrator
+from app.ml.calibration import BinaryCalibrator, OutcomeCalibrator
+from app.ml.evaluate import OUTCOMES
+
+
+class _ZeroModel:
+    """Stub isotonic model that maps every score to zero."""
+
+    def predict(self, scores):
+        return np.zeros(len(scores))
 
 
 def _sample_rows(count: int) -> tuple[list[tuple[float, float, float]], list[str]]:
@@ -58,3 +67,20 @@ class TestOutcomeCalibrator:
 
         with pytest.raises(ValueError, match="Need at least 30 samples"):
             calibrator.fit(probabilities, labels)
+
+    def test_transform_falls_back_to_raw_probs_when_calibration_degenerates(self):
+        """Isotonic can map all three one-vs-rest scores to zero; the
+        calibrator must serve the raw probabilities instead of raising."""
+        calibrator = OutcomeCalibrator()
+        calibrator.is_fitted = True
+        calibrator.mode = "isotonic"
+        calibrator.calibrators = {
+            outcome: BinaryCalibrator(mode="isotonic", model=_ZeroModel())
+            for outcome in OUTCOMES
+        }
+
+        raw = (0.5, 0.3, 0.2)
+        calibrated = calibrator.transform(raw)
+
+        assert pytest.approx(sum(calibrated), rel=1e-9) == 1.0
+        assert calibrated == pytest.approx(raw)

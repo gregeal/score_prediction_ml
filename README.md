@@ -208,6 +208,21 @@ Every training run logs to MLflow:
 
 Access the MLflow UI at http://localhost:5000 to compare runs, view metrics, and track model evolution over time.
 
+## Benchmarking Model Configurations
+
+`backend/scripts/benchmark_model.py` runs a strict walk-forward backtest (each chunk of
+test matches is predicted by a model trained only on earlier matches) across time-decay
+half-lives and shrinkage strengths, and compares against a naive baseline, the legacy
+configuration, and the challenger model:
+
+```bash
+# From backend/ (uses DATABASE_URL; add --challenger for the GBM comparison)
+python scripts/benchmark_model.py --challenger
+```
+
+The current production defaults (half-life 540 days, L2 = 5.0) were selected with this
+script on the three most recent completed seasons.
+
 ## Running Tests
 
 ```bash
@@ -235,9 +250,10 @@ python -m pytest tests/ -v
 1. **Team Ratings:** Estimates attack and defense strength for each EPL team using maximum likelihood estimation on historical results.
 2. **Home Advantage:** A parameter capturing the statistical edge of playing at home.
 3. **Low-Score Correction:** The Dixon-Coles rho factor adjusts probabilities for 0-0, 1-0, 0-1, and 1-1 scorelines.
-4. **Time Weighting:** Exponential decay (half-life = 1 season) so recent form matters more.
-5. **Score Matrix:** A 10x10 probability matrix for every possible scoreline.
-6. **Derived Predictions:**
+4. **Time Weighting:** Exponential decay (half-life = 540 days, tuned by walk-forward backtest) so recent form matters more.
+5. **Shrinkage:** An L2 penalty pulls attack/defense strengths toward the league average, stabilizing estimates for teams with few matches (e.g. newly promoted sides). Teams with no history at all get promoted-team default strengths instead of being skipped.
+6. **Score Matrix:** A 10x10 probability matrix for every possible scoreline.
+7. **Derived Predictions:**
    - **1X2:** Home win / Draw / Away win probabilities
    - **Exact Score:** Top 5 most likely scorelines
    - **Over/Under 2.5:** Probability of total goals > 2.5
