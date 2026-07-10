@@ -1,4 +1,4 @@
-"""Fetch sports-betting market odds and sync them into the database."""
+"""Fetch bookmaker market odds and sync them into the database."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.models.base import ensure_database_ready, get_session_local
 from app.models.market_odds import MarketOdds
 from app.models.match import Match
-from app.services.odds_provider import SportsBettingOddsFetcher
+from app.services.odds_provider import FootballDataOddsFetcher
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -65,16 +65,22 @@ def main():
     logger.info("Database tables created")
 
     db = get_session_local()()
-    fetcher = SportsBettingOddsFetcher(seasons=SEASONS)
+    fetcher = FootballDataOddsFetcher(seasons=SEASONS)
 
     try:
         matches = db.query(Match).all()
         odds_rows, unmatched = fetcher.build_market_odds_rows(matches, include_fixtures=True)
+        if not odds_rows:
+            logger.warning(
+                "No odds rows could be loaded or matched; odds are optional benchmark "
+                "data, so this is not fatal."
+            )
+            return
         added, updated = sync_market_odds(db, odds_rows)
         db.commit()
 
         logger.info(
-            "Sports-betting odds sync complete: added=%s updated=%s unmatched=%s total_rows=%s",
+            "Market odds sync complete: added=%s updated=%s unmatched=%s total_rows=%s",
             added,
             updated,
             unmatched,
