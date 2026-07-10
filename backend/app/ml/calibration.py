@@ -87,4 +87,10 @@ class OutcomeCalibrator:
         for index, outcome in enumerate(OUTCOMES):
             calibrated_value = self.calibrators[outcome].predict(probs[:, index])[0]
             calibrated.append(float(calibrated_value))
+
+        # Isotonic regression can map all three one-vs-rest scores to 0
+        # (e.g. probabilities below every positive example seen in fitting).
+        # Serve the raw probabilities rather than failing normalization.
+        if sum(calibrated) <= 0:
+            return normalize_probs(probs[0])
         return normalize_probs(calibrated)

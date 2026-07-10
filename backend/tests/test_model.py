@@ -107,9 +107,18 @@ class TestDixonColesModel:
         pred = self.model.predict_match("TeamA", "TeamD")
         assert pred.confidence in ("high", "medium", "low")
 
-    def test_unknown_team_raises(self):
-        with pytest.raises(ValueError, match="Unknown team"):
-            self.model.predict_match("TeamA", "NonExistentFC")
+    def test_unknown_team_gets_fallback_prediction(self):
+        """Unknown (e.g. newly promoted) teams get promoted-team default strengths."""
+        pred = self.model.predict_match("TeamA", "NonExistentFC")
+        total = pred.home_win_prob + pred.draw_prob + pred.away_win_prob
+        assert abs(total - 1.0) < 0.01
+        assert (pred.score_matrix >= 0).all()
+
+    def test_fallback_strengths_are_weak(self):
+        """Promoted-team defaults should reflect the weaker end of the league."""
+        params = self.model.params
+        assert params.default_attack <= max(params.attack.values())
+        assert params.default_defense >= min(params.defense.values())
 
     def test_unfitted_model_raises(self):
         fresh_model = DixonColesModel()
@@ -121,3 +130,14 @@ class TestDixonColesModel:
         parts = pred.most_likely_score.split("-")
         assert len(parts) == 2
         assert all(p.isdigit() for p in parts)
+
+    def test_score_matrix_nonnegative_under_extreme_rho(self):
+        """The tau correction must never leave negative cells in the matrix.
+
+        With rho = -0.4 and lambda = 3.0, tau(0,1) = 1 + 3.0 * -0.4 < 0 before
+        clipping; the matrix must still be a valid distribution.
+        """
+        self.model.params.rho = -0.4
+        matrix = self.model._calculate_score_matrix(3.0, 1.0)
+        assert (matrix >= 0).all()
+        assert abs(matrix.sum() - 1.0) < 1e-9

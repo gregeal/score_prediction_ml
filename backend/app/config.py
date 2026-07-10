@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 # Look for .env in backend/ first, then project root
@@ -15,6 +16,15 @@ class Settings(BaseSettings):
     cors_allowed_origins: str = "http://localhost:3000,https://gregeal.github.io"
 
     model_config = {"env_file": str(_env_file), "extra": "ignore"}
+
+    @field_validator("database_url")
+    @classmethod
+    def _normalize_database_url(cls, value: str) -> str:
+        # Render (and Heroku) emit the legacy postgres:// scheme, which
+        # SQLAlchemy 2.0 no longer accepts.
+        if value.startswith("postgres://"):
+            return value.replace("postgres://", "postgresql://", 1)
+        return value
 
     @property
     def cors_allowed_origins_list(self) -> list[str]:

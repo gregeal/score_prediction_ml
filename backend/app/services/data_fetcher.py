@@ -26,19 +26,33 @@ class FootballDataFetcher:
         self.session.headers.update({"X-Auth-Token": self.api_key})
         self._last_request_time = 0.0
 
+    MAX_RATE_LIMIT_RETRIES = 5
+
     def _rate_limited_get(self, url: str, params: dict | None = None) -> dict:
-        """Make a GET request with rate limiting."""
-        elapsed = time.time() - self._last_request_time
-        if elapsed < RATE_LIMIT_DELAY:
-            time.sleep(RATE_LIMIT_DELAY - elapsed)
+        """Make a GET request with rate limiting and bounded 429 retries."""
+        for attempt in range(self.MAX_RATE_LIMIT_RETRIES + 1):
+            elapsed = time.time() - self._last_request_time
+            if elapsed < RATE_LIMIT_DELAY:
+                time.sleep(RATE_LIMIT_DELAY - elapsed)
 
-        response = self.session.get(url, params=params)
-        self._last_request_time = time.time()
+            response = self.session.get(url, params=params)
+            self._last_request_time = time.time()
 
-        if response.status_code == 429:
-            logger.warning("Rate limited. Waiting 60 seconds...")
-            time.sleep(60)
-            return self._rate_limited_get(url, params)
+            if response.status_code != 429:
+                response.raise_for_status()
+                return response.json()
+
+            if attempt < self.MAX_RATE_LIMIT_RETRIES:
+                try:
+                    wait = int(response.headers.get("Retry-After", 60))
+                except ValueError:
+                    wait = 60
+                wait = min(max(wait, 1), 300)
+                logger.warning(
+                    "Rate limited (attempt %s/%s). Waiting %ss...",
+                    attempt + 1, self.MAX_RATE_LIMIT_RETRIES, wait,
+                )
+                time.sleep(wait)
 
         response.raise_for_status()
         return response.json()

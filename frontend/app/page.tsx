@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-import { apiUrl } from "@/lib/api";
+import { apiUrl, parseApiDate } from "@/lib/api";
 
 interface Prediction {
   outcome: { home_win: number; draw: number; away_win: number };
@@ -98,7 +98,7 @@ function QuickLinkCard({
 
 function FixtureCard({ fixture }: { fixture: Fixture }) {
   const prediction = fixture.prediction;
-  const matchDate = new Date(fixture.date);
+  const matchDate = parseApiDate(fixture.date);
   const dateLabel = matchDate.toLocaleDateString("en-NG", {
     weekday: "short",
     day: "numeric",

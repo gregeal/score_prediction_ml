@@ -1,5 +1,7 @@
 """Fixtures API endpoints."""
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -8,6 +10,18 @@ from app.models.match import Match
 from app.models.prediction import Prediction
 
 router = APIRouter(tags=["fixtures"])
+
+
+def iso_utc(dt: datetime) -> str:
+    """Serialize a stored (naive UTC) datetime with an explicit UTC offset.
+
+    Without the offset, JavaScript's Date constructor interprets the string
+    as LOCAL time and every displayed kickoff shifts by the viewer's UTC
+    offset.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 
 @router.get("/fixtures/upcoming")
@@ -34,7 +48,7 @@ def get_upcoming_fixtures(db: Session = Depends(get_db)):
             "match_id": match.api_id,
             "home": match.home_team,
             "away": match.away_team,
-            "date": match.utc_date.isoformat(),
+            "date": iso_utc(match.utc_date),
             "matchday": match.matchday,
         }
 

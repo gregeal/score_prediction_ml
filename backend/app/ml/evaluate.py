@@ -448,7 +448,7 @@ def build_recent_backtest_predictions(
     max_evaluated_matches: int = 40,
     min_train_matches: int = 60,
     training_window_matches: int = 200,
-    time_decay_days: int = 365,
+    time_decay_days: int = 540,
 ) -> list[EvaluatedPrediction]:
     """Build a recent walk-forward backtest for dashboards when live eval rows do not exist yet."""
 

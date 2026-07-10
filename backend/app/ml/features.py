@@ -163,7 +163,7 @@ def matches_to_training_data(
     matches: list[Match],
     time_decay_days: int = 365,
     reference_date: datetime | None = None,
-    use_form_weighting: bool = True,
+    use_form_weighting: bool = False,
 ) -> list[MatchData]:
     """Convert database Match objects to MatchData for model training.
 
@@ -176,6 +176,8 @@ def matches_to_training_data(
         time_decay_days: Half-life for time weighting in days.
         reference_date: Date to calculate weights from (defaults to now).
         use_form_weighting: Whether to apply form-based weight adjustments.
+            Off by default: rescaling a team's entire history by its CURRENT
+            form biases the joint likelihood without adding momentum signal.
 
     Returns:
         List of MatchData objects ready for model.fit().
@@ -381,10 +383,22 @@ def build_match_features(
     dc_home_xg: float,
     dc_away_xg: float,
     reference_date: datetime | None = None,
+    promotion_context: list | None = None,
 ) -> MatchFeatures:
-    """Assemble all features for a single fixture."""
+    """Assemble all features for a single fixture.
+
+    Args:
+        promotion_context: Match list used to decide the is_promoted flags.
+            Defaults to ``matches``. During walk-forward training the form/
+            rest/h2h context is truncated to pre-match history; promotion
+            status is calendar knowledge (known before kickoff), so passing
+            the full match list here avoids mislabeling established teams as
+            promoted in early training rows.
+    """
     if reference_date is None:
         reference_date = datetime.now(timezone.utc)
+    if promotion_context is None:
+        promotion_context = matches
 
     home_elo = elo_system.get_rating(home_team)
     away_elo = elo_system.get_rating(away_team)
@@ -412,6 +426,6 @@ def build_match_features(
         h2h_home_wins=h2h_h,
         h2h_draws=h2h_d,
         h2h_away_wins=h2h_a,
-        home_is_promoted=is_newly_promoted(matches, home_team),
-        away_is_promoted=is_newly_promoted(matches, away_team),
+        home_is_promoted=is_newly_promoted(promotion_context, home_team),
+        away_is_promoted=is_newly_promoted(promotion_context, away_team),
     )

@@ -29,7 +29,14 @@ out/
 *.pkl
 *.joblib
 models/*.bin
+backend/active_model.txt
 
 # Database
 *.db
 *.sqlite3
+
+# Logs
+*.log
+
+# MLflow local file store
+mlruns/

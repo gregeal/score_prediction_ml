@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -9,12 +10,12 @@ export const metadata: Metadata = {
 
 function NavLink({ href, children }: { href: string; children: React.ReactNode }) {
   return (
-    <a
+    <Link
       href={href}
       className="text-sm text-slate-400 hover:text-white transition-colors px-3 py-2 rounded-lg hover:bg-white/5"
     >
       {children}
-    </a>
+    </Link>
   );
 }
 
@@ -24,11 +25,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body className="min-h-screen" suppressHydrationWarning>
         <nav className="border-b border-slate-800 bg-slate-950/80 backdrop-blur-sm sticky top-0 z-50">
           <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
-            <a href="/" className="flex items-center gap-2">
+            <Link href="/" className="flex items-center gap-2">
               <span className="text-lg font-bold text-white">
                 Predict<span className="text-green-500">EPL</span>
               </span>
-            </a>
+            </Link>
             <div className="flex items-center gap-1">
               <NavLink href="/">Matches</NavLink>
               <NavLink href="/accuracy">Accuracy</NavLink>
