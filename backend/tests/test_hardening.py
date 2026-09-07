@@ -187,6 +187,25 @@ def test_security_headers_and_disallowed_origin(db):
     assert "access-control-allow-origin" not in result.headers
 
 
+def test_data_status_distinguishes_unsynced_season_from_historical_data(db):
+    db.add(match(season="2025"))
+    db.commit()
+    client = TestClient(app)
+    result = client.get("/api/data-status")
+    assert result.status_code == 200
+    assert result.headers["cache-control"] == "no-store"
+    assert result.json()["current_season"] == "2026"
+    assert result.json()["latest_available_season"] == "2025"
+    assert result.json()["current_season_matches"] == 0
+    assert result.json()["latest_prediction_at"] is None
+    db.add_all([match(2), prediction(match_api_id=2)])
+    db.commit()
+    refreshed = client.get("/api/data-status").json()
+    assert refreshed["current_season_matches"] == 1
+    assert refreshed["current_season_finished"] == 1
+    assert refreshed["latest_prediction_at"].endswith("+00:00")
+
+
 @pytest.mark.parametrize("isotonic", [False, True])
 def test_fitted_bundle_roundtrip(tmp_path, monkeypatch, isotonic):
     from app.services import predictor as module

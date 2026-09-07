@@ -5,6 +5,7 @@
   "engines": { "node": ">=22", "npm": ">=10" },
   "packageManager": "npm@11.8.0",
   "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "clean": "node -e \"require('fs').rmSync('.next', { recursive: true, force: true })\"",
     "dev": "next dev",
     "build": "next build",

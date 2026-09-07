@@ -1,11 +1,13 @@
 services:
   - type: web
     name: predictepl-api
+    branch: master
     runtime: python
     rootDir: backend
     plan: starter
     region: ohio
     buildCommand: pip install -r requirements.lock
+    preDeployCommand: python scripts/run_pipeline.py
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
@@ -24,6 +26,7 @@ services:
 
   - type: cron
     name: predictepl-daily-pipeline
+    branch: master
     runtime: python
     rootDir: backend
     plan: starter

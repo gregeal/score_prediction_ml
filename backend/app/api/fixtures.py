@@ -1,9 +1,11 @@
 """Fixtures API endpoints."""
 
 from datetime import datetime, timezone
+import os
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.models.base import get_db
 from app.models.match import Match
@@ -11,6 +13,25 @@ from app.models.prediction import Prediction
 from app.seasons import current_season_year, utc_now
 
 router = APIRouter(tags=["fixtures"])
+
+
+@router.get("/data-status")
+def get_data_status(db: Session = Depends(get_db)):
+    """Expose public release/season metadata, never credentials or connection URLs."""
+    season = str(current_season_year())
+    current = db.query(Match).filter(Match.season == season)
+    latest_prediction = db.query(func.max(Prediction.created_at)).join(
+        Match, Match.api_id == Prediction.match_api_id,
+    ).filter(Match.season == season).scalar()
+    return {
+        "api_revision": 2,
+        "deployment_commit": os.getenv("RENDER_GIT_COMMIT"),
+        "current_season": season,
+        "latest_available_season": db.query(func.max(Match.season)).scalar(),
+        "current_season_matches": current.count(),
+        "current_season_finished": current.filter(Match.status == "FINISHED", Match.home_goals.isnot(None), Match.away_goals.isnot(None)).count(),
+        "latest_prediction_at": iso_utc(latest_prediction) if latest_prediction else None,
+    }
 
 
 def iso_utc(dt: datetime) -> str:

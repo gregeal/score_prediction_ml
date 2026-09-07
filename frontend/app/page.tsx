@@ -1,9 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-
-import { apiFetch, parseApiDate } from "@/lib/api";
+import { parseApiDate } from "@/lib/api";
+import { useCurrentSeason } from "@/lib/use-current-season";
 
 interface Prediction {
   outcome: { home_win: number; draw: number; away_win: number };
@@ -174,27 +173,9 @@ function FixtureCard({ fixture }: { fixture: Fixture }) {
 }
 
 export default function HomePage() {
-  const [fixtures, setFixtures] = useState<Fixture[]>([]);
-  const [season, setSeason] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    apiFetch("/api/fixtures/upcoming")
-      .then((response) => {
-        if (!response.ok) throw new Error("Failed to fetch fixtures");
-        return response.json();
-      })
-      .then((data) => {
-        setFixtures(data.fixtures);
-        setSeason(data.season ?? null);
-        setLoading(false);
-      })
-      .catch((err) => {
-        setError(err.message);
-        setLoading(false);
-      });
-  }, []);
+  const { data, loading, error, retry } = useCurrentSeason<{ season: string; fixtures: Fixture[] }>("/api/fixtures/upcoming");
+  const fixtures = data?.fixtures ?? [];
+  const season = data?.season;
 
   return (
     <div className="space-y-8">
@@ -286,7 +267,7 @@ export default function HomePage() {
         {error && (
           <div className="rounded-[1.5rem] border border-rose-500/20 bg-rose-500/10 px-6 py-10 text-center">
             <p className="text-rose-300">{error}</p>
-            <p className="mt-2 text-sm text-slate-400">Make sure the backend API is running on port 8000.</p>
+            <button type="button" onClick={retry} className="mt-4 rounded-lg border border-slate-600 px-4 py-2 text-white">Retry current season</button>
           </div>
         )}
 

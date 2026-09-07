@@ -1,8 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
-
-import { apiFetch } from "@/lib/api";
+import { useCurrentSeason } from "@/lib/use-current-season";
 
 interface TeamStanding {
   position: number;
@@ -18,29 +16,9 @@ interface TeamStanding {
 }
 
 export default function StandingsPage() {
-  const [standings, setStandings] = useState<TeamStanding[]>([]);
-  const [season, setSeason] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    apiFetch("/api/standings")
-      .then((res) => {
-        if (!res.ok) {
-          throw new Error(`API responded with status ${res.status}`);
-        }
-        return res.json();
-      })
-      .then((data) => {
-        setStandings(data.standings ?? []);
-        setSeason(data.season ?? null);
-        setLoading(false);
-      })
-      .catch(() => {
-        setError("Could not reach the prediction API. Please try again shortly.");
-        setLoading(false);
-      });
-  }, []);
+  const { data, loading, error, retry } = useCurrentSeason<{ season: string; standings: TeamStanding[] }>("/api/standings");
+  const standings = data?.standings ?? [];
+  const season = data?.season;
 
   if (loading) {
     return <div className="text-center py-12 text-slate-400">Loading standings...</div>;
@@ -50,6 +28,7 @@ export default function StandingsPage() {
     return (
       <div className="bg-slate-900 border border-rose-500/30 rounded-xl p-8 text-center text-rose-300">
         {error}
+        <button type="button" onClick={retry} className="block mx-auto mt-4 rounded-lg border border-slate-600 px-4 py-2 text-white">Retry current season</button>
       </div>
     );
   }
