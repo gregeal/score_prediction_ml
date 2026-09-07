@@ -1,7 +1,6 @@
 """Tests for PredictionService persistence and model selection."""
 
 from datetime import datetime, timedelta, timezone
-import pickle
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -70,6 +69,7 @@ def _fake_dc_result(brier_score: float) -> MagicMock:
 def tmp_model_dir(tmp_path):
     """Redirect all predictor artifacts to a temp directory."""
     with (
+        patch.object(predictor_module, "BUNDLE_PATH", tmp_path / "models.skops"),
         patch.object(predictor_module, "DC_MODEL_PATH", tmp_path / "dc.pkl"),
         patch.object(predictor_module, "CHALLENGER_MODEL_PATH", tmp_path / "challenger.pkl"),
         patch.object(predictor_module, "ELO_PATH", tmp_path / "elo.pkl"),
@@ -87,28 +87,25 @@ class TestLoadModelPersistence:
         active_path = tmp_model_dir / "active_model.txt"
         calibrator_path = tmp_model_dir / "calibrator.pkl"
 
-        with open(dc_path, "wb") as fh:
-            pickle.dump(_fit_dummy_dc_model(), fh)
+        saved = PredictionService(MagicMock())
+        saved.dc_model = _fit_dummy_dc_model()
 
         challenger = ChallengerModel()
         challenger.is_fitted = True
-        with open(challenger_path, "wb") as fh:
-            pickle.dump(challenger, fh)
+        saved.challenger = challenger
 
         elo = EloSystem()
         elo.update("A", "B", 3, 0)
-        with open(elo_path, "wb") as fh:
-            pickle.dump(elo, fh)
+        saved.elo_system = elo
 
         calibrator = OutcomeCalibrator(min_samples=3, isotonic_min_samples=50, min_class_examples=1)
         calibrator.fit(
             [(0.7, 0.2, 0.1), (0.2, 0.6, 0.2), (0.1, 0.2, 0.7)],
             ["home", "draw", "away"],
         )
-        with open(calibrator_path, "wb") as fh:
-            pickle.dump(calibrator, fh)
-
-        active_path.write_text("challenger")
+        saved.calibrator = calibrator
+        saved.active_model = "challenger"
+        saved.save_model()
 
         service = PredictionService(MagicMock())
         assert service.active_model == "dixon_coles"
@@ -124,8 +121,9 @@ class TestLoadModelPersistence:
 
     def test_load_without_active_file_defaults_to_dc(self, tmp_model_dir):
         dc_path = tmp_model_dir / "dc.pkl"
-        with open(dc_path, "wb") as fh:
-            pickle.dump(_fit_dummy_dc_model(), fh)
+        saved = PredictionService(MagicMock())
+        saved.dc_model = _fit_dummy_dc_model()
+        saved.save_model()
 
         service = PredictionService(MagicMock())
         service.load_model()

@@ -1,0 +1,3 @@
+# Optional tracking client. The application does not need an embedded MLflow server.
+-r requirements.txt
+mlflow-skinny==3.16.0

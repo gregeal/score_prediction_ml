@@ -12,12 +12,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.models.base import ensure_database_ready, get_session_local
 from app.models.market_odds import MarketOdds
 from app.models.match import Match
+from app.seasons import season_years
 from app.services.odds_provider import FootballDataOddsFetcher
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-SEASONS = [2022, 2023, 2024, 2025, 2026]
 
 
 def sync_market_odds(db, odds_rows: list[dict]) -> tuple[int, int]:
@@ -65,7 +65,7 @@ def main():
     logger.info("Database tables created")
 
     db = get_session_local()()
-    fetcher = FootballDataOddsFetcher(seasons=SEASONS)
+    fetcher = FootballDataOddsFetcher(seasons=season_years())
 
     try:
         matches = db.query(Match).all()

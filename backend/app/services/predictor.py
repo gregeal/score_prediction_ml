@@ -2,12 +2,10 @@
 
 import logging
 import os
-import pickle
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 # Fail fast when the MLflow tracking server is unreachable instead of
@@ -53,6 +51,10 @@ except ModuleNotFoundError:
     mlflow = _NoOpMlflow()
 
 from app.config import settings
+from app.seasons import current_season_year, utc_now
+from app.ml.artifacts import load_bundle, save_bundle
+from app.services.prediction_history import eligible_prediction_ids
+from app.services.tracking import SafeTracking
 from app.models.match import Match
 from app.models.prediction import Prediction
 from app.ml.calibration import OutcomeCalibrator
@@ -72,6 +74,7 @@ CHALLENGER_MODEL_PATH = MODEL_DIR / "challenger_model.pkl"
 ELO_PATH = MODEL_DIR / "elo_system.pkl"
 ACTIVE_MODEL_PATH = MODEL_DIR / "active_model.txt"
 CALIBRATOR_PATH = MODEL_DIR / "outcome_calibrator.pkl"
+BUNDLE_PATH = MODEL_DIR / "prediction_bundle.skops"
 MLFLOW_EXPERIMENT = "predictepl"
 
 
@@ -87,8 +90,9 @@ class PredictionService:
         self.elo_system: EloSystem | None = None
         self.calibrator: OutcomeCalibrator | None = None
         self.active_model = "dixon_coles"  # or "challenger"
+        self.model_version = "untrained"
         if settings.mlflow_tracking_uri:
-            mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
+            SafeTracking(mlflow).set_tracking_uri(settings.mlflow_tracking_uri)
 
     @property
     def model(self):
@@ -99,13 +103,16 @@ class PredictionService:
     def _mlflow(self):
         """MLflow logger, resolved lazily so an unreachable tracking server
         can be swapped for a no-op and tests can patch the module global."""
-        return self._mlflow_override if self._mlflow_override is not None else mlflow
+        if not settings.mlflow_tracking_uri:
+            return _NoOpMlflow()
+        return SafeTracking(self._mlflow_override if self._mlflow_override is not None else mlflow)
 
     def train_model(self, run_evaluation: bool = True) -> None:
         """Train both models on all finished matches in the database."""
         matches = (
             self.db.query(Match)
-            .filter(Match.status == "FINISHED")
+            .filter(Match.status == "FINISHED", Match.home_goals.isnot(None),
+                    Match.away_goals.isnot(None), Match.utc_date < utc_now())
             .order_by(Match.utc_date)
             .all()
         )
@@ -113,7 +120,9 @@ class PredictionService:
             raise ValueError("No finished matches in database to train on")
 
         # 1. Train Dixon-Coles
-        training_data = matches_to_training_data(matches)
+        self.active_model = "dixon_coles"
+        self.challenger = ChallengerModel(time_decay_days=self.dc_model.time_decay_days)
+        training_data = matches_to_training_data(matches, time_decay_days=self.dc_model.time_decay_days)
         logger.info(f"Training Dixon-Coles on {len(training_data)} matches...")
         dc_params = self.dc_model.fit(training_data)
 
@@ -170,25 +179,14 @@ class PredictionService:
             self._fit_outcome_calibrator()
 
             # 7. Save models + active model choice
-            with open(DC_MODEL_PATH, "wb") as f:
-                pickle.dump(self.dc_model, f)
-            if challenger_trained:
-                with open(CHALLENGER_MODEL_PATH, "wb") as f:
-                    pickle.dump(self.challenger, f)
-            with open(ELO_PATH, "wb") as f:
-                pickle.dump(self.elo_system, f)
-            ACTIVE_MODEL_PATH.write_text(self.active_model)
-            if self.calibrator and self.calibrator.is_fitted:
-                with open(CALIBRATOR_PATH, "wb") as f:
-                    pickle.dump(self.calibrator, f)
+            self.model_version = datetime.now(timezone.utc).isoformat()
+            self.save_model()
 
             mlflow_log.log_param("active_model", self.active_model)
             mlflow_log.log_param("calibration_enabled", bool(self.calibrator and self.calibrator.is_fitted))
             if self.calibrator and self.calibrator.is_fitted:
                 mlflow_log.log_param("calibration_version", self.calibrator.version)
-            mlflow_log.log_artifact(str(DC_MODEL_PATH))
-            if self.calibrator and self.calibrator.is_fitted:
-                mlflow_log.log_artifact(str(CALIBRATOR_PATH))
+            mlflow_log.log_artifact(str(BUNDLE_PATH))
 
             logger.info(
                 f"Training complete. Active model: {self.active_model}. "
@@ -197,11 +195,18 @@ class PredictionService:
 
     def _evaluate_and_log(self, raw_matches: list[Match], challenger_trained: bool) -> None:
         """Backtest both models, log metrics, pick the winner by Brier score."""
-        all_data = matches_to_training_data(raw_matches, use_form_weighting=False)
-
-        split_idx = int(len(all_data) * 0.8)
-        train_split = all_data[:split_idx]
-        test_split = all_data[split_idx:]
+        finished_sorted = sorted(
+            [m for m in raw_matches if m.status == "FINISHED" and m.home_goals is not None and m.away_goals is not None],
+            key=lambda m: m.utc_date,
+        )
+        if len(finished_sorted) < 50:
+            return
+        cutoff = finished_sorted[int(len(finished_sorted) * 0.8)].utc_date
+        train_matches_raw = [m for m in finished_sorted if m.utc_date < cutoff]
+        test_matches_raw = [m for m in finished_sorted if m.utc_date >= cutoff]
+        reference_date = cutoff.replace(tzinfo=timezone.utc) if cutoff.tzinfo is None else cutoff
+        train_split = matches_to_training_data(train_matches_raw, time_decay_days=self.dc_model.time_decay_days, reference_date=reference_date, use_form_weighting=False)
+        test_split = matches_to_training_data(test_matches_raw, reference_date=reference_date, use_form_weighting=False)
 
         if len(test_split) < 10:
             logger.warning("Not enough test matches for evaluation, skipping")
@@ -232,16 +237,11 @@ class PredictionService:
 
         # Build a FRESH challenger trained only on the training split to avoid
         # leaking test-set info through Dixon-Coles params or Elo ratings.
-        finished_sorted = sorted(
-            [m for m in raw_matches if m.status == "FINISHED"],
-            key=lambda m: m.utc_date,
-        )
-        train_matches_raw = finished_sorted[:split_idx]
         train_elo = EloSystem.from_matches(train_matches_raw)
 
         eval_challenger = ChallengerModel(time_decay_days=self.challenger.time_decay_days)
         try:
-            eval_challenger.fit(train_matches_raw, train_elo)
+            eval_challenger.fit(train_matches_raw, train_elo, reference_date=reference_date)
         except ValueError as e:
             logger.warning(f"Challenger eval skipped (not enough train data): {e}")
             self.active_model = "dixon_coles"
@@ -254,13 +254,14 @@ class PredictionService:
         challenger_brier = []
         challenger_total = 0
 
-        for match_data in test_split:
+        for raw_match, match_data in zip(test_matches_raw, test_split):
             try:
                 pred = eval_challenger.predict_match(
                     match_data.home_team,
                     match_data.away_team,
                     train_elo,
                     train_context_desc,
+                    reference_date=raw_match.utc_date.replace(tzinfo=timezone.utc),
                 )
             except (ValueError, KeyError):
                 continue
@@ -295,7 +296,7 @@ class PredictionService:
             logger.info(f"GBM eval: outcome={gbm_accuracy:.1%}, brier={gbm_brier:.4f}")
 
             # Pick winner
-            if gbm_brier < dc_result.brier_score:
+            if challenger_total == dc_result.total_matches and gbm_brier < dc_result.brier_score:
                 self.active_model = "challenger"
                 logger.info(f"Challenger wins: brier {gbm_brier:.4f} < {dc_result.brier_score:.4f}")
             else:
@@ -307,14 +308,7 @@ class PredictionService:
     def _fit_outcome_calibrator(self) -> None:
         """Fit a calibrator from historical finished matches with stored predictions."""
 
-        latest_prediction_ids = (
-            self.db.query(
-                Prediction.match_api_id,
-                sa_func.max(Prediction.id).label("latest_id"),
-            )
-            .group_by(Prediction.match_api_id)
-            .subquery()
-        )
+        latest_prediction_ids = eligible_prediction_ids(self.db, self.active_model)
 
         rows = (
             self.db.query(Prediction, Match)
@@ -345,8 +339,6 @@ class PredictionService:
 
         if not probabilities:
             self.calibrator = None
-            if CALIBRATOR_PATH.exists():
-                CALIBRATOR_PATH.unlink()
             return
 
         calibrator = OutcomeCalibrator()
@@ -355,8 +347,6 @@ class PredictionService:
         except ValueError as exc:
             logger.info(f"Outcome calibrator skipped: {exc}")
             self.calibrator = None
-            if CALIBRATOR_PATH.exists():
-                CALIBRATOR_PATH.unlink()
             return
 
         self.calibrator = calibrator
@@ -395,7 +385,7 @@ class PredictionService:
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1]
 
-    def _apply_outcome_calibration(self, prediction: MatchPrediction) -> tuple[float, float, float]:
+    def _apply_outcome_calibration(self, prediction: MatchPrediction, model_used: str | None = None) -> tuple[float, float, float]:
         """Apply 1X2 calibration to a match prediction if a calibrator is available."""
 
         raw_probs = (
@@ -405,7 +395,7 @@ class PredictionService:
         )
         served_probs = raw_probs
 
-        if self.calibrator and self.calibrator.is_fitted:
+        if self.calibrator and self.calibrator.is_fitted and (model_used is None or model_used == self.active_model):
             served_probs = self.calibrator.transform(raw_probs)
 
         prediction.home_win_prob = round(float(served_probs[0]), 4)
@@ -422,29 +412,30 @@ class PredictionService:
         return raw_probs
 
     def load_model(self) -> None:
-        """Load previously trained models from disk."""
-        if not DC_MODEL_PATH.exists():
-            raise FileNotFoundError(f"No trained model at {DC_MODEL_PATH}")
-        with open(DC_MODEL_PATH, "rb") as f:
-            self.dc_model = pickle.load(f)
-        if CHALLENGER_MODEL_PATH.exists():
-            with open(CHALLENGER_MODEL_PATH, "rb") as f:
-                self.challenger = pickle.load(f)
-        if ELO_PATH.exists():
-            with open(ELO_PATH, "rb") as f:
-                self.elo_system = pickle.load(f)
-        if CALIBRATOR_PATH.exists():
-            with open(CALIBRATOR_PATH, "rb") as f:
-                self.calibrator = pickle.load(f)
-        if ACTIVE_MODEL_PATH.exists():
-            self.active_model = ACTIVE_MODEL_PATH.read_text().strip()
+        """Load a complete generation without deserializing executable pickle."""
+        bundle = load_bundle(BUNDLE_PATH)
+        self.dc_model = bundle["dc_model"]
+        self.challenger = bundle["challenger"]
+        self.elo_system = bundle["elo_system"]
+        self.calibrator = bundle["calibrator"]
+        self.active_model = bundle["active_model"]
+        self.model_version = bundle["model_version"]
         logger.info(f"Models loaded. Active: {self.active_model}")
+
+    def save_model(self) -> None:
+        save_bundle(BUNDLE_PATH, {
+            "format_version": 1, "dc_model": self.dc_model,
+            "challenger": self.challenger, "elo_system": self.elo_system,
+            "calibrator": self.calibrator, "active_model": self.active_model,
+            "model_version": self.model_version,
+        })
 
     def predict_upcoming(self) -> list[MatchPrediction]:
         """Generate predictions for all upcoming matches using the active model."""
         upcoming = (
             self.db.query(Match)
-            .filter(Match.status.in_(["SCHEDULED", "TIMED"]))
+            .filter(Match.status.in_(["SCHEDULED", "TIMED"]),
+                    Match.utc_date > utc_now(), Match.season == str(current_season_year()))
             .order_by(Match.utc_date)
             .all()
         )
@@ -484,13 +475,13 @@ class PredictionService:
                 if pred is None:
                     pred = self.dc_model.predict_match(match.home_team, match.away_team)
 
-                raw_probs = self._apply_outcome_calibration(pred)
+                # Training can run past a kickoff. Do not create a post-match forecast.
+                if match.utc_date.replace(tzinfo=None) <= utc_now():
+                    continue
+                raw_probs = self._apply_outcome_calibration(pred, model_used)
                 predictions.append(pred)
 
-                # Delete any previous prediction for this match
-                self.db.query(Prediction).filter(
-                    Prediction.match_api_id == match.api_id
-                ).delete()
+                # Keep the forecast history for honest pre-kickoff evaluation.
 
                 # Store prediction (convert np.float64 to float for PostgreSQL)
                 db_pred = Prediction(
@@ -511,8 +502,9 @@ class PredictionService:
                     outcome_score=pred.outcome_score,
                     confidence=pred.confidence,
                     model_name=model_used,
-                    model_version=model_used,
-                    calibration_version=self.calibrator.version if self.calibrator and self.calibrator.is_fitted else None,
+                    model_version=self.model_version,
+                    created_at=utc_now(),
+                    calibration_version=self.calibrator.version if model_used == self.active_model and self.calibrator and self.calibrator.is_fitted else None,
                 )
                 self.db.add(db_pred)
             except (ValueError, KeyError) as e:

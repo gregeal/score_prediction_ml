@@ -4,10 +4,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-predictepl}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-predictepl}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-predictepl}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -17,29 +17,19 @@ services:
       retries: 5
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v3.10.1-full
+    image: ghcr.io/mlflow/mlflow:v3.16.0-full
+    profiles: [tracking]
     restart: unless-stopped
-    command: ["bash", "-c", "pip install psycopg2-binary -q && mlflow server --backend-store-uri postgresql://${POSTGRES_USER:-predictepl}:${POSTGRES_PASSWORD:-predictepl}@db:5432/mlflow --default-artifact-root /mlflow/artifacts --host 0.0.0.0 --port 5000 --disable-security-middleware"]
+    command: ["sh", "-c", "pip install psycopg2-binary==2.9.10 -q && exec mlflow server --backend-store-uri \"$$MLFLOW_BACKEND_STORE_URI\" --default-artifact-root /mlflow/artifacts --host 0.0.0.0 --port 5000"]
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://${POSTGRES_USER:-predictepl}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/mlflow
+    depends_on:
+      mlflow-db-init:
+        condition: service_completed_successfully
     ports:
-      - "5000:5000"
+      - "127.0.0.1:5000:5000"
     volumes:
       - mlflow_artifacts:/mlflow/artifacts
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      - MLFLOW_TRACKING_URI=http://localhost:5000
-
-  mlflow-db-init:
-    image: postgres:16-alpine
-    depends_on:
-      db:
-        condition: service_healthy
-    entrypoint: >
-      sh -c "
-        PGPASSWORD=${POSTGRES_PASSWORD:-predictepl} psql -h db -U ${POSTGRES_USER:-predictepl} -tc \"SELECT 1 FROM pg_database WHERE datname = 'mlflow'\" | grep -q 1 || PGPASSWORD=${POSTGRES_PASSWORD:-predictepl} psql -h db -U ${POSTGRES_USER:-predictepl} -c 'CREATE DATABASE mlflow'
-      "
-    restart: "no"
 
   backend:
     build:
@@ -47,19 +37,28 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-predictepl}:${POSTGRES_PASSWORD:-predictepl}@db:5432/${POSTGRES_DB:-predictepl}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-predictepl}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-predictepl}
       FOOTBALL_DATA_API_KEY: ${FOOTBALL_DATA_API_KEY}
-      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_TRACKING_URI: ""
     depends_on:
       db:
         condition: service_healthy
-      mlflow:
-        condition: service_started
-    volumes:
-      - ./backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  mlflow-db-init:
+    image: postgres:16-alpine
+    profiles: [tracking]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      PGUSER: ${POSTGRES_USER:-predictepl}
+      PGHOST: db
+      PGDATABASE: postgres
+    entrypoint: ["sh", "-c", "psql -v ON_ERROR_STOP=1 -tc \"SELECT 1 FROM pg_database WHERE datname = 'mlflow'\" | grep -q 1 || createdb mlflow"]
+    restart: "no"
 
 volumes:
   postgres_data:

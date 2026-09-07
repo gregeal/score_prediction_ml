@@ -2,12 +2,13 @@
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.models.base import get_db
 from app.models.match import Match
 from app.models.prediction import Prediction
+from app.seasons import current_season_year, utc_now
 
 router = APIRouter(tags=["fixtures"])
 
@@ -29,7 +30,8 @@ def get_upcoming_fixtures(db: Session = Depends(get_db)):
     """Get upcoming fixtures with their predictions."""
     upcoming = (
         db.query(Match)
-        .filter(Match.status.in_(["SCHEDULED", "TIMED"]))
+        .filter(Match.status.in_(["SCHEDULED", "TIMED"]),
+                Match.utc_date > utc_now(), Match.season == str(current_season_year()))
         .order_by(Match.utc_date)
         .limit(20)
         .all()
@@ -39,8 +41,10 @@ def get_upcoming_fixtures(db: Session = Depends(get_db)):
     for match in upcoming:
         pred = (
             db.query(Prediction)
-            .filter(Prediction.match_api_id == match.api_id)
-            .order_by(Prediction.created_at.desc())
+            .filter(Prediction.match_api_id == match.api_id,
+                    Prediction.home_team == match.home_team,
+                    Prediction.away_team == match.away_team)
+            .order_by(Prediction.created_at.desc(), Prediction.id.desc())
             .first()
         )
 
@@ -64,33 +68,27 @@ def get_upcoming_fixtures(db: Session = Depends(get_db)):
                 "over_under_25": pred.over25_prob,
                 "btts": pred.btts_prob,
                 "confidence": pred.confidence,
+                "generated_at": iso_utc(pred.created_at),
+                "model_name": pred.model_name,
             }
         else:
             fixture["prediction"] = None
 
         results.append(fixture)
 
-    return {"fixtures": results, "count": len(results)}
+    return {"fixtures": results, "count": len(results), "season": str(current_season_year())}
 
 
 @router.get("/standings")
-def get_standings(db: Session = Depends(get_db)):
+def get_standings(db: Session = Depends(get_db), season: int | None = Query(default=None, ge=1992, le=2100)):
     """Get current EPL standings derived from match results."""
-    finished = (
+    current_season = str(season if season is not None else current_season_year())
+    season_matches = (
         db.query(Match)
-        .filter(Match.status == "FINISHED")
+        .filter(Match.season == current_season)
         .order_by(Match.utc_date.desc())
         .all()
     )
-
-    if not finished:
-        return {"standings": [], "season": None}
-
-    # Get current season
-    current_season = finished[0].season
-
-    # Filter to current season only
-    season_matches = [m for m in finished if m.season == current_season]
 
     # Build standings table
     table: dict[str, dict] = {}
@@ -103,7 +101,7 @@ def get_standings(db: Session = Depends(get_db)):
                     "goal_difference": 0, "points": 0,
                 }
 
-        if match.home_goals is None:
+        if match.status != "FINISHED" or match.home_goals is None or match.away_goals is None:
             continue
 
         ht, at = match.home_team, match.away_team

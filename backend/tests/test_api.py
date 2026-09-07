@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 import app.api.predictions as predictions_api
 from app.main import app
@@ -16,8 +17,8 @@ from app.models.match import Match
 from app.models.prediction import Prediction
 
 # Use in-memory SQLite for tests
-TEST_DATABASE_URL = "sqlite:///./test.db"
-engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
+TEST_DATABASE_URL = "sqlite://"
+engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False}, poolclass=StaticPool)
 TestSession = sessionmaker(bind=engine)
 
 
@@ -33,10 +34,16 @@ app.dependency_overrides[get_db] = override_get_db
 
 
 @pytest.fixture(autouse=True)
-def setup_db():
+def setup_db(monkeypatch):
+    import app.seasons as seasons
+    import app.api.fixtures as fixtures_api
+    monkeypatch.setattr(seasons, "utc_now", lambda: datetime(2026, 3, 10))
+    monkeypatch.setattr(fixtures_api, "utc_now", lambda: datetime(2026, 3, 10))
+    app.dependency_overrides[get_db] = override_get_db
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -100,6 +107,7 @@ def seed_data():
     db.add(pred)
 
     finished_pred = Prediction(
+        created_at=datetime(2026, 2, 28),
         match_api_id=12345,
         home_team="Arsenal FC",
         away_team="Chelsea FC",
@@ -181,7 +189,7 @@ class TestFixturesEndpoints:
         response = client.get("/api/standings")
         assert response.status_code == 200
         data = response.json()
-        assert len(data["standings"]) == 2
+        assert len(data["standings"]) == 4
         # Arsenal won, so should be first
         assert data["standings"][0]["team"] == "Arsenal FC"
         assert data["standings"][0]["points"] == 3

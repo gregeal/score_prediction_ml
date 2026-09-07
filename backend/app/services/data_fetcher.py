@@ -35,7 +35,9 @@ class FootballDataFetcher:
             if elapsed < RATE_LIMIT_DELAY:
                 time.sleep(RATE_LIMIT_DELAY - elapsed)
 
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, timeout=(10, 30), allow_redirects=False)
+            if 300 <= response.status_code < 400:
+                raise requests.exceptions.HTTPError("Unexpected API redirect", response=response)
             self._last_request_time = time.time()
 
             if response.status_code != 429:

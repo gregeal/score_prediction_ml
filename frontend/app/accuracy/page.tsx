@@ -2,7 +2,7 @@
 
 import { type ReactNode, useEffect, useState } from "react";
 
-import { apiUrl } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 
 interface SummaryData {
   active_model?: string | null;
@@ -114,16 +114,18 @@ function StatCard({
 }
 
 function Section({
+  id,
   title,
   subtitle,
   children,
 }: {
+  id?: string;
   title: string;
   subtitle: string;
   children: ReactNode;
 }) {
   return (
-    <section className="rounded-3xl border border-slate-800 bg-slate-950/70 p-6 shadow-[0_30px_80px_-48px_rgba(8,145,178,0.45)]">
+    <section id={id} className="scroll-mt-8 rounded-3xl border border-slate-800 bg-slate-950/70 p-6 shadow-[0_30px_80px_-48px_rgba(8,145,178,0.45)]">
       <div className="mb-5">
         <h2 className="text-lg font-semibold text-white">{title}</h2>
         <p className="mt-1 text-sm text-slate-400">{subtitle}</p>
@@ -139,7 +141,7 @@ export default function AccuracyPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(apiUrl("/api/accuracy"))
+    apiFetch("/api/accuracy")
       .then((res) => {
         if (!res.ok) {
           throw new Error(`API responded with status ${res.status}`);
@@ -381,7 +383,8 @@ export default function AccuracyPage() {
       {Object.keys(benchmarks).length > 0 && (
         <Section
           title="Benchmark Table"
-          subtitle="The key question is not whether the model looks clever, but whether it beats simpler alternatives and the market when odds are available."
+          id="benchmarks"
+          subtitle="Compare Bookmaker with Model On Market: those rows use exactly the same games. Historical odds are a retrospective benchmark, not evidence of executable value bets."
         >
           <div className="overflow-x-auto">
             <table className="min-w-full border-separate border-spacing-y-3">

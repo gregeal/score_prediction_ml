@@ -56,7 +56,7 @@ def compute_form(matches: list[Match], team: str, last_n: int = 5) -> TeamForm:
     results = []
 
     for match in matches:
-        if match.status != "FINISHED" or match.home_goals is None:
+        if match.status != "FINISHED" or match.home_goals is None or match.away_goals is None:
             continue
         if match.home_team != team and match.away_team != team:
             continue
@@ -261,7 +261,7 @@ def compute_home_form(matches: list, team: str, last_n: int = 5) -> TeamForm:
     """Compute form from HOME games only (matches sorted by date descending)."""
     form = TeamForm(team=team, last_n=0)
     for match in matches:
-        if match.status != "FINISHED" or match.home_goals is None:
+        if match.status != "FINISHED" or match.home_goals is None or match.away_goals is None:
             continue
         if match.home_team != team:
             continue
@@ -290,7 +290,7 @@ def compute_away_form(matches: list, team: str, last_n: int = 5) -> TeamForm:
     """Compute form from AWAY games only (matches sorted by date descending)."""
     form = TeamForm(team=team, last_n=0)
     for match in matches:
-        if match.status != "FINISHED" or match.away_goals is None:
+        if match.status != "FINISHED" or match.home_goals is None or match.away_goals is None:
             continue
         if match.away_team != team:
             continue
@@ -341,7 +341,7 @@ def compute_h2h(
     h_wins, draws, a_wins = 0, 0, 0
     count = 0
     for match in matches:
-        if match.status != "FINISHED" or match.home_goals is None:
+        if match.status != "FINISHED" or match.home_goals is None or match.away_goals is None:
             continue
         teams = {match.home_team, match.away_team}
         if teams != {home_team, away_team}:

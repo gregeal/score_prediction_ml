@@ -11,7 +11,7 @@ from app.models.match import Match
 from scripts.fetch_data import sync_parsed_matches
 
 
-TEST_DATABASE_URL = "sqlite:///./test_fetch_data.db"
+TEST_DATABASE_URL = "sqlite://"
 engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
 TestSession = sessionmaker(bind=engine)
 

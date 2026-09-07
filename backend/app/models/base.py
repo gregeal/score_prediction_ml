@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 @lru_cache
 def _make_engine():
-    return create_engine(settings.database_url, echo=False)
+    return create_engine(settings.database_url, echo=False, pool_pre_ping=True)
 
 
 @lru_cache

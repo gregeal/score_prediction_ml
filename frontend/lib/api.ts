@@ -13,6 +13,10 @@ export function apiUrl(path: string): string {
   return `${getApiBaseUrl()}${normalizedPath}`;
 }
 
+export function apiFetch(path: string): Promise<Response> {
+  return fetch(apiUrl(path), { signal: AbortSignal.timeout(30000), cache: "no-store" });
+}
+
 /**
  * Parse an API datetime as UTC even when the backend omits the offset.
  * JavaScript's Date constructor treats offset-less ISO strings as LOCAL

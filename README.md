@@ -4,6 +4,32 @@ AI-powered English Premier League score predictions for the Nigerian market.
 
 Uses a **Dixon-Coles Poisson model** to predict match outcomes, exact scores, over/under 2.5 goals, and both-teams-to-score (BTTS) probabilities.
 
+## Current Season and Upgrade Notes
+
+The pipeline automatically requests the current EPL season plus four previous seasons,
+starting with the current one. In September 2026 that is **2026/27**; the season rolls
+forward each July in UTC. Historical seasons denied by the free API tier are skipped,
+but a denied current season fails the sync rather than reporting misleading success.
+Standings default to the current season, including unplayed teams; use
+`/api/standings?season=2025` for an older table. Stale past fixtures are no longer
+presented as upcoming.
+
+After upgrading, use Python 3.12, Node 22+, npm 10+, and the committed dependency
+lockfiles. Run `python scripts/run_pipeline.py` from `backend/` with the configured
+database available. **Retraining is required for legacy model files:** pickle files
+are deliberately not loaded. New models are written atomically to one type-checked
+`prediction_bundle.skops` file; existing database predictions are preserved.
+
+The home page shows forecast timestamps. The headline score matches the favored
+1X2 outcome; when different, the most likely exact score is shown separately.
+Exact-score accuracy evaluates that most likely exact score. The dashboard only
+scores forecasts generated before kickoff, otherwise it explicitly labels its
+walk-forward fallback. Compare the **Model On Market** and **Bookmaker** rows for
+equal match coverage. These are retrospective odds benchmarks, not executable bets.
+
+See [security and operations guidance](SECURITY.md). Unit/API tests, the static Pages
+build, and dependency audits also run in GitHub Actions.
+
 ## Tech Stack
 
 - **ML Model:** Python, SciPy, scikit-learn (Dixon-Coles Poisson regression)
@@ -61,7 +87,7 @@ cd score_prediction_ml
 cp .env.example .env
 # Edit .env and add your football-data.org API key
 
-# 2. Start PostgreSQL, MLflow, and the backend API
+# 2. Set a strong POSTGRES_PASSWORD in .env, then start PostgreSQL and the backend API
 docker compose up -d
 
 # 3. Fetch EPL data (run inside the backend container)
@@ -154,10 +180,10 @@ If you prefer running without Docker:
 
 ```bash
 # 1. Set up Python environment
-uv venv venv --python 3.12
-source venv/Scripts/activate  # Windows Git Bash
-# source venv/bin/activate    # macOS/Linux
-uv pip install --python venv/Scripts/python.exe -r backend/requirements.txt
+uv venv .venv --python 3.12
+source .venv/Scripts/activate  # Windows Git Bash
+# source .venv/bin/activate    # macOS/Linux
+uv pip sync backend/requirements.lock
 
 # 2. Configure
 cp .env.example .env
@@ -199,12 +225,16 @@ docker compose down -v
 
 ## MLflow Experiment Tracking
 
-Every training run logs to MLflow:
+MLflow is optional and disabled by default. Install `backend/requirements-mlflow.txt`
+into a separate tracking-enabled environment and set `MLFLOW_TRACKING_URI` to use it.
+For the local server, run `docker compose --profile tracking up -d mlflow`.
+The existing PostgreSQL tracking database and artifact volume are retained.
+Tracking failures never prevent model computation or saving. Enabled runs log:
 
 - **Parameters:** model type, time decay, number of training matches, team count
 - **Metrics:** home advantage, rho, per-team attack/defense strengths
 - **Evaluation metrics:** outcome accuracy, exact score accuracy, O/U 2.5 accuracy, BTTS accuracy, Brier score, log loss
-- **Artifacts:** trained model pickle file
+- **Artifacts:** type-checked model bundle
 
 Access the MLflow UI at http://localhost:5000 to compare runs, view metrics, and track model evolution over time.
 
@@ -226,10 +256,7 @@ script on the three most recent completed seasons.
 ## Running Tests
 
 ```bash
-# With Docker
-docker compose exec backend python -m pytest tests/ -v
-
-# Without Docker (from backend/ directory)
+# Local source checkout, from backend/ (tests are excluded from the production image)
 python -m pytest tests/ -v
 ```
 

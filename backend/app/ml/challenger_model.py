@@ -41,7 +41,7 @@ class ChallengerModel:
         self.is_fitted = False
         self.time_decay_days = time_decay_days
 
-    def fit(self, matches: list, elo_system: EloSystem | None = None) -> None:
+    def fit(self, matches: list, elo_system: EloSystem | None = None, reference_date: datetime | None = None) -> None:
         """Train the GBM on features extracted from historical matches.
 
         Args:
@@ -52,12 +52,12 @@ class ChallengerModel:
         """
         # Train Dixon-Coles on the full history: this is the base model used
         # at prediction time (never for historical feature rows).
-        training_data = matches_to_training_data(matches, use_form_weighting=False)
+        training_data = matches_to_training_data(matches, time_decay_days=self.time_decay_days, reference_date=reference_date, use_form_weighting=False)
         if len(training_data) < 50:
             raise ValueError("Need at least 50 matches to train challenger model")
         self.dixon_coles.fit(training_data)
 
-        finished = [m for m in matches if m.status == "FINISHED" and m.home_goals is not None]
+        finished = [m for m in matches if m.status == "FINISHED" and m.home_goals is not None and m.away_goals is not None]
         sorted_by_date = sorted(finished, key=lambda m: m.utc_date)
 
         rolling_elo = EloSystem()
@@ -65,7 +65,12 @@ class ChallengerModel:
         last_refit_index = -1
 
         X, y = [], []
+        group_start = 0
         for i, match in enumerate(sorted_by_date):
+            if i and match.utc_date != sorted_by_date[group_start].utc_date:
+                for previous in sorted_by_date[group_start:i]:
+                    rolling_elo.update(previous.home_team, previous.away_team, previous.home_goals, previous.away_goals)
+                group_start = i
             if i >= self.MIN_HISTORY:
                 match_date = match.utc_date
                 if match_date.tzinfo is None:
@@ -76,7 +81,7 @@ class ChallengerModel:
                 # match i or anything after it.
                 if walk_forward_dc is None or i - last_refit_index >= self.DC_REFIT_EVERY:
                     prior_data = matches_to_training_data(
-                        sorted_by_date[:i],
+                        sorted_by_date[:group_start],
                         time_decay_days=self.time_decay_days,
                         reference_date=match_date,
                         use_form_weighting=False,
@@ -97,7 +102,7 @@ class ChallengerModel:
 
                     if dc_pred is not None:
                         # Feature context: only matches before this one (no leakage)
-                        context = sorted_by_date[i - 1 :: -1] if i > 0 else []
+                        context = sorted_by_date[group_start - 1 :: -1] if group_start > 0 else []
 
                         features = build_match_features(
                             matches=context,
@@ -107,7 +112,7 @@ class ChallengerModel:
                             dc_home_xg=float(dc_pred.predicted_home_goals),
                             dc_away_xg=float(dc_pred.predicted_away_goals),
                             reference_date=match_date,
-                            promotion_context=sorted_by_date,
+                            promotion_context=context,
                         )
                         X.append(features.to_vector())
 
@@ -119,8 +124,7 @@ class ChallengerModel:
                         else:
                             y.append(2)
 
-            # Update rolling Elo AFTER extracting features for this match
-            rolling_elo.update(match.home_team, match.away_team, match.home_goals, match.away_goals)
+            # The whole kickoff group updates Elo together before the next group.
 
         if len(X) < 50:
             raise ValueError(f"Only {len(X)} feature samples, need at least 50")

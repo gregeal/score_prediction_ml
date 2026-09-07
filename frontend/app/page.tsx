@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-import { apiUrl, parseApiDate } from "@/lib/api";
+import { apiFetch, parseApiDate } from "@/lib/api";
 
 interface Prediction {
   outcome: { home_win: number; draw: number; away_win: number };
@@ -12,6 +12,8 @@ interface Prediction {
   over_under_25: number;
   btts: number;
   confidence: string;
+  generated_at?: string;
+  model_name?: string;
 }
 
 interface Fixture {
@@ -157,6 +159,14 @@ function FixtureCard({ fixture }: { fixture: Fixture }) {
               BTTS: <strong>{(prediction.btts * 100).toFixed(0)}%</strong> Yes
             </span>
           </div>
+          {prediction.generated_at && (
+            <p className="mt-3 text-xs text-slate-500">
+              Updated <time dateTime={prediction.generated_at}>{parseApiDate(prediction.generated_at).toLocaleString()}</time>
+            </p>
+          )}
+          {prediction.outcome_score !== prediction.most_likely_score && (
+            <p className="mt-1 text-xs text-slate-500">Most likely exact score: {prediction.most_likely_score}</p>
+          )}
         </>
       )}
     </div>
@@ -165,17 +175,19 @@ function FixtureCard({ fixture }: { fixture: Fixture }) {
 
 export default function HomePage() {
   const [fixtures, setFixtures] = useState<Fixture[]>([]);
+  const [season, setSeason] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(apiUrl("/api/fixtures/upcoming"))
+    apiFetch("/api/fixtures/upcoming")
       .then((response) => {
         if (!response.ok) throw new Error("Failed to fetch fixtures");
         return response.json();
       })
       .then((data) => {
         setFixtures(data.fixtures);
+        setSeason(data.season ?? null);
         setLoading(false);
       })
       .catch((err) => {
@@ -239,7 +251,7 @@ export default function HomePage() {
           accent="from-emerald-400/40 to-cyan-400/25"
         />
         <QuickLinkCard
-          href="/accuracy"
+          href="/accuracy#benchmarks"
           eyebrow="Benchmarks"
           title="Model vs Market"
           description="See whether the model is beating the rolling league prior and bookmaker implied probabilities."
@@ -259,6 +271,7 @@ export default function HomePage() {
           <div>
             <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Upcoming</p>
             <h2 className="mt-2 text-2xl font-semibold text-white">Upcoming Matches</h2>
+            {season && <p className="mt-1 text-sm text-emerald-300">Season {season}/{(Number(season) + 1).toString().slice(-2)}</p>}
             <p className="mt-1 text-sm text-slate-400">
               AI-powered EPL scorelines, probability splits, and confidence flags for the next fixtures.
             </p>

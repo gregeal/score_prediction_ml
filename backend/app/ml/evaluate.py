@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass
+from functools import lru_cache
+from threading import Lock
 from datetime import datetime, timezone
 from math import log
 from typing import Callable
@@ -236,6 +238,8 @@ def normalize_probs(probs: tuple[float, float, float] | list[float] | np.ndarray
     """Normalize probabilities so they sum to 1.0."""
 
     array = np.asarray(probs, dtype=float)
+    if array.shape != (3,) or not np.isfinite(array).all() or (array < 0).any():
+        raise ValueError("Expected three finite, nonnegative probabilities")
     total = float(array.sum())
     if total <= 0:
         raise ValueError("Probability vector must sum to a positive number")
@@ -291,6 +295,8 @@ def build_calibration_buckets(
     """Bucket predictions by confidence and compare predicted vs realized rates."""
 
     buckets: list[CalibrationBucket] = []
+    if not 0 < bucket_size <= 1:
+        raise ValueError("bucket_size must be in (0, 1]")
     if not predictions:
         return buckets
 
@@ -302,7 +308,7 @@ def build_calibration_buckets(
             confidence = prediction.confidence_for(probability_source)
             if confidence is None:
                 continue
-            if start <= confidence < end or (end == 1.0 and confidence <= end):
+            if start <= confidence < end or (end == 1.0 and start <= confidence <= end):
                 bucket_predictions.append(prediction)
 
         if bucket_predictions:
@@ -363,6 +369,8 @@ def build_rolling_window_metrics(
 ) -> list[RollingWindowMetrics]:
     """Compute rolling metrics across chronologically ordered predictions."""
 
+    if window_size < 1 or step_size < 1:
+        raise ValueError("Window and step sizes must be positive")
     if not predictions:
         return []
 
@@ -417,6 +425,16 @@ def compare_benchmarks(predictions: list[EvaluatedPrediction]) -> dict[str, Benc
             avg_log_loss=summary.avg_log_loss,
         )
 
+    # Market coverage is often partial. Provide a paired model comparison,
+    # rather than implying that scores on different cohorts are comparable.
+    paired = [prediction for prediction in predictions if prediction.bookmaker_probs is not None]
+    if paired:
+        result = evaluate_predictions(paired)
+        benchmarks["model_on_market"] = BenchmarkMetrics(
+            available=True, total_matches=result.total_matches,
+            outcome_accuracy=result.outcome_accuracy, brier_score=result.brier_score,
+            avg_log_loss=result.avg_log_loss,
+        )
     return benchmarks
 
 
@@ -439,7 +457,26 @@ def build_dashboard_result(predictions: list[EvaluatedPrediction]) -> AccuracyDa
     )
 
 
-def build_recent_backtest_predictions(
+_BACKTEST_LOCK = Lock()
+
+
+def build_recent_backtest_predictions(matches: list[Match], **kwargs) -> list[EvaluatedPrediction]:
+    """Bounded process cache, invalidated by results/corrections or odds changes."""
+    rows = tuple((m.api_id, m.utc_date, m.status, m.home_team, m.away_team, m.home_goals, m.away_goals) for m in matches)
+    priors = tuple(sorted((kwargs.pop("baseline_probs_by_match", None) or {}).items()))
+    odds = tuple(sorted((kwargs.pop("bookmaker_probs_by_match", None) or {}).items()))
+    # Serialize cache misses so simultaneous dashboard requests cannot fan out training.
+    with _BACKTEST_LOCK:
+        return list(_cached_backtest(rows, priors, odds, tuple(sorted(kwargs.items()))))
+
+
+@lru_cache(maxsize=4)
+def _cached_backtest(rows, priors, odds, options):
+    matches = [Match(api_id=r[0], utc_date=r[1], status=r[2], home_team=r[3], away_team=r[4], home_goals=r[5], away_goals=r[6]) for r in rows]
+    return tuple(_build_recent_backtest_predictions(matches, baseline_probs_by_match=dict(priors), bookmaker_probs_by_match=dict(odds), **dict(options)))
+
+
+def _build_recent_backtest_predictions(
     matches: list[Match],
     *,
     baseline_probs_by_match: dict[int, tuple[float, float, float]] | None = None,
@@ -474,7 +511,7 @@ def build_recent_backtest_predictions(
         if reference_date.tzinfo is None:
             reference_date = reference_date.replace(tzinfo=timezone.utc)
 
-        train_matches = finished[max(0, chunk_start - training_window_matches) : chunk_start]
+        train_matches = [m for m in finished[:chunk_start] if m.utc_date < chunk[0].utc_date][-training_window_matches:]
         training_data = matches_to_training_data(
             train_matches,
             time_decay_days=time_decay_days,
@@ -513,7 +550,7 @@ def build_recent_backtest_predictions(
                     actual_outcome=actual_outcome,
                     match_date=match.utc_date,
                     match_api_id=match.api_id,
-                    predicted_score=prediction.outcome_score or prediction.most_likely_score,
+                    predicted_score=prediction.most_likely_score,
                     actual_score=f"{match.home_goals}-{match.away_goals}",
                     over25_prob=prediction.over25_prob,
                     btts_prob=prediction.btts_prob,

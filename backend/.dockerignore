@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite3
+*.pkl
+*.skops
+*.log
+mlruns
+__pycache__
+.pytest_cache
+tests

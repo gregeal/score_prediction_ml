@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import logging
+import math
 import re
 import urllib.request
 from datetime import datetime, timezone
@@ -115,7 +116,7 @@ def _first_available(row: dict, column_groups) -> list[float | None]:
 
     for group in column_groups:
         values = [_float_or_none(row.get(column)) for column in group]
-        if all(value is not None and value > 0 for value in values):
+        if all(value is not None and math.isfinite(value) and value > 1 for value in values):
             return values
     return [None] * len(column_groups[0])
 
@@ -130,7 +131,9 @@ class FootballDataOddsFetcher:
     def _read_csv(url: str) -> pd.DataFrame:
         request = urllib.request.Request(url, headers={"User-Agent": "predictepl/1.0"})
         with urllib.request.urlopen(request, timeout=30) as response:
-            raw = response.read()
+            raw = response.read(5_000_001)
+            if len(raw) > 5_000_000:
+                raise ValueError("Odds response exceeds the 5 MB limit")
         try:
             return pd.read_csv(io.BytesIO(raw), encoding="utf-8-sig", on_bad_lines="skip")
         except UnicodeDecodeError:

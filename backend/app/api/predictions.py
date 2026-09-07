@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from itertools import groupby
+from math import isfinite
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
@@ -12,6 +14,7 @@ from app.models.base import get_db
 from app.models.market_odds import MarketOdds
 from app.models.match import Match
 from app.models.prediction import Prediction
+from app.services.prediction_history import eligible_prediction_ids
 
 router = APIRouter(tags=["predictions"])
 
@@ -46,7 +49,7 @@ def _implied_probs(odds: MarketOdds | None) -> tuple[float, float, float] | None
     if odds is None:
         return None
     values = [odds.home_win_odds, odds.draw_odds, odds.away_win_odds]
-    if any(value is None or value <= 0 for value in values):
+    if any(value is None or not isfinite(value) or value <= 1 for value in values):
         return None
 
     inverted = [1.0 / float(value) for value in values]
@@ -60,14 +63,13 @@ def _league_priors(matches: list[Match]) -> dict[int, tuple[float, float, float]
     counts = {"home": 1, "draw": 1, "away": 1}
     priors: dict[int, tuple[float, float, float]] = {}
 
-    for match in matches:
+    for _, simultaneous in groupby(matches, key=lambda match: match.utc_date):
+        group = list(simultaneous)
         total = counts["home"] + counts["draw"] + counts["away"]
-        priors[match.api_id] = (
-            counts["home"] / total,
-            counts["draw"] / total,
-            counts["away"] / total,
-        )
-        counts[_match_outcome(match)] += 1
+        for match in group:
+            priors[match.api_id] = (counts["home"] / total, counts["draw"] / total, counts["away"] / total)
+        for match in group:
+            counts[_match_outcome(match)] += 1
 
     return priors
 
@@ -138,18 +140,11 @@ def get_prediction(match_api_id: int, db: Session = Depends(get_db)):
 def get_accuracy(db: Session = Depends(get_db)):
     """Get model accuracy stats plus calibration, trend, and benchmark views."""
 
-    latest_pred = (
-        db.query(
-            Prediction.match_api_id,
-            sa_func.max(Prediction.id).label("latest_id"),
-        )
-        .group_by(Prediction.match_api_id)
-        .subquery()
-    )
+    latest_pred = eligible_prediction_ids(db)
 
     finished_matches = (
         db.query(Match)
-        .filter(Match.status == "FINISHED", Match.home_goals.isnot(None))
+        .filter(Match.status == "FINISHED", Match.home_goals.isnot(None), Match.away_goals.isnot(None))
         .order_by(Match.utc_date)
         .all()
     )
@@ -164,7 +159,7 @@ def get_accuracy(db: Session = Depends(get_db)):
         db.query(Prediction, Match)
         .join(latest_pred, Prediction.id == latest_pred.c.latest_id)
         .join(Match, Match.api_id == Prediction.match_api_id)
-        .filter(Match.status == "FINISHED", Match.home_goals.isnot(None))
+        .filter(Match.status == "FINISHED", Match.home_goals.isnot(None), Match.away_goals.isnot(None))
         .order_by(Match.utc_date)
         .all()
     )
@@ -185,7 +180,7 @@ def get_accuracy(db: Session = Depends(get_db)):
                     actual_outcome=_match_outcome(match),
                     match_date=match.utc_date,
                     match_api_id=match.api_id,
-                    predicted_score=prediction.outcome_score or prediction.most_likely_score,
+                    predicted_score=prediction.most_likely_score,
                     actual_score=f"{match.home_goals}-{match.away_goals}",
                     over25_prob=float(prediction.over25_prob),
                     btts_prob=float(prediction.btts_prob),
@@ -234,12 +229,12 @@ def get_accuracy(db: Session = Depends(get_db)):
         "over_under_accuracy": dashboard.over25_accuracy,
         "btts_accuracy": dashboard.btts_accuracy,
         "summary": {
-            "active_model": latest_prediction.model_name if latest_prediction else None,
-            "calibrated": bool(latest_prediction and latest_prediction.calibration_version),
+            "active_model": "dixon_coles" if evaluation_source == "walk_forward_backtest" else (latest_prediction.model_name if latest_prediction else None),
+            "calibrated": evaluation_source == "stored_predictions" and bool(latest_prediction and latest_prediction.calibration_version),
             "brier_score": dashboard.brier_score,
             "avg_log_loss": dashboard.avg_log_loss,
-            "model_version": latest_prediction.model_version if latest_prediction else None,
-            "calibration_version": latest_prediction.calibration_version if latest_prediction else None,
+            "model_version": latest_prediction.model_version if latest_prediction and evaluation_source == "stored_predictions" else None,
+            "calibration_version": latest_prediction.calibration_version if latest_prediction and evaluation_source == "stored_predictions" else None,
             "benchmark_delta_vs_naive": benchmark_delta,
             "evaluation_source": evaluation_source,
         },

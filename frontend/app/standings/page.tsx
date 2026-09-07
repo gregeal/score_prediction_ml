@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-import { apiUrl } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 
 interface TeamStanding {
   position: number;
@@ -24,7 +24,7 @@ export default function StandingsPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(apiUrl("/api/standings"))
+    apiFetch("/api/standings")
       .then((res) => {
         if (!res.ok) {
           throw new Error(`API responded with status ${res.status}`);
@@ -67,7 +67,7 @@ export default function StandingsPage() {
 
       {standings.length === 0 ? (
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-8 text-center text-slate-400">
-          No standings data available. Run the data pipeline first.
+          No data has been synced for this season yet. Refresh the data pipeline to load the current fixtures and results.
         </div>
       ) : (
         <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
